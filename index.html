@@ -1,47 +1,384 @@
 <!doctype html>
 <html lang="ja">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>縦書きPDF 画像リフロー</title>
 <style>
-:root{--bg:#f5f5f2;--panel:#fff;--ink:#191919;--line:#d8d8d3;--accent:#222}
-*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;height:100%}
-header{position:sticky;top:0;z-index:10;background:rgba(245,245,242,.96);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);padding:calc(8px + env(safe-area-inset-top)) 12px 9px}
-.top{display:flex;gap:8px;align-items:center}.file{flex:1;position:relative;overflow:hidden}.file input{position:absolute;inset:0;opacity:0;width:100%}.btn,.file span{display:flex;align-items:center;justify-content:center;min-height:42px;border:1px solid #bbb;border-radius:12px;background:#fff;padding:0 12px;font-weight:650;font-size:14px}.btn:active,.file span:active{background:#e9e9e5}
-.controls{margin-top:8px;display:grid;grid-template-columns:1fr auto;gap:6px 10px;align-items:center}.controls label{font-size:12px;color:#555}.controls output{font-variant-numeric:tabular-nums;font-weight:700}.controls input[type=range]{grid-column:1/3;width:100%;accent-color:#222}
-details{margin-top:7px;font-size:12px}details .advanced{display:grid;grid-template-columns:1fr auto;gap:5px 10px;margin-top:7px}.advanced input{grid-column:1/3;width:100%}
-main{height:calc(100dvh - 150px);min-height:300px;overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;position:relative}
-#reader{height:100%;display:flex;flex-direction:row-reverse;align-items:flex-start;gap:0;padding:10px 10px calc(24px + env(safe-area-inset-bottom));width:max-content;min-width:100%}
-.col{display:block;flex:none;object-fit:none;background:#fff}.placeholder{width:100vw;padding:42px 28px;text-align:center;color:#777;line-height:1.8;font-size:14px}.status{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:20;background:#111;color:#fff;padding:8px 13px;border-radius:99px;font-size:12px;display:none;max-width:90vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.nav{display:flex;gap:6px}.nav .btn{min-width:45px;padding:0 8px}.page{font-size:12px;white-space:nowrap;color:#555}
+:root{--bg:#f5f5f2;--panel:#fff;--ink:#191919;--line:#d8d8d3}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;height:100%;overflow:hidden}
+header{position:relative;z-index:10;background:rgba(245,245,242,.97);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);padding:calc(8px + env(safe-area-inset-top)) 12px 9px}
+.top{display:flex;gap:8px;align-items:center}
+.file{flex:1;position:relative;overflow:hidden}
+.file input{position:absolute;inset:0;opacity:0;width:100%}
+.btn,.file span{display:flex;align-items:center;justify-content:center;min-height:42px;border:1px solid #bbb;border-radius:12px;background:#fff;padding:0 12px;font-weight:650;font-size:14px}
+.btn:active,.file span:active{background:#e9e9e5}
+.controls{margin-top:8px;display:grid;grid-template-columns:1fr auto;gap:6px 10px;align-items:center}
+.controls label{font-size:12px;color:#555}
+.controls output{font-variant-numeric:tabular-nums;font-weight:700}
+.controls input[type=range]{grid-column:1/3;width:100%;accent-color:#222}
+details{margin-top:7px;font-size:12px}
+details .advanced{display:grid;grid-template-columns:1fr auto;gap:5px 10px;margin-top:7px}
+.advanced input{grid-column:1/3;width:100%}
+main{height:calc(100dvh - 150px);min-height:300px;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;position:relative;touch-action:pan-x}
+#reader{height:100%;display:flex;flex-direction:row-reverse;align-items:flex-start;gap:0;padding:10px 10px calc(10px + env(safe-area-inset-bottom));width:max-content;min-width:100%}
+.col{display:block;flex:none;object-fit:none;background:#fff}
+.placeholder{width:100vw;padding:42px 28px;text-align:center;color:#777;line-height:1.8;font-size:14px}
+.status{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:20;background:#111;color:#fff;padding:8px 13px;border-radius:99px;font-size:12px;display:none;max-width:90vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nav{display:flex;gap:6px}.nav .btn{min-width:45px;padding:0 8px}.page{font-size:12px;white-space:nowrap;color:#555}
 </style>
-</head><body>
-<header>
-<div class="top"><label class="file"><span>PDFを選択</span><input id="pdfFile" type="file" accept="application/pdf"></label><div class="nav"><button class="btn" id="prev">‹</button><button class="btn" id="next">›</button></div><span class="page" id="pageInfo">— / —</span></div>
-<div class="controls"><label for="zoom">文字の拡大率</label><output id="zoomOut">160%</output><input id="zoom" type="range" min="100" max="300" value="160" step="10"></div>
-<details><summary>本文領域の調整</summary><div class="advanced"><label>上端を無視</label><output id="topOut">7%</output><input id="topCrop" type="range" min="0" max="20" value="7" step="1"><label>下端を無視</label><output id="bottomOut">7%</output><input id="bottomCrop" type="range" min="0" max="20" value="7" step="1"><label>列間の余白</label><output id="gapOut">10px</output><input id="gap" type="range" min="0" max="30" value="10" step="1"></div></details>
+</head>
+<body>
+<header id="header">
+<div class="top">
+<label class="file"><span>PDFを選択</span><input id="pdfFile" type="file" accept="application/pdf"></label>
+<div class="nav"><button class="btn" id="prev">‹</button><button class="btn" id="next">›</button></div>
+<span class="page" id="pageInfo">— / —</span>
+</div>
+<div class="controls">
+<label for="zoom">文字の拡大率</label><output id="zoomOut">160%</output>
+<input id="zoom" type="range" min="100" max="300" value="160" step="10">
+</div>
+<details>
+<summary>本文領域・列認識の調整</summary>
+<div class="advanced">
+<label>上端を無視</label><output id="topOut">7%</output>
+<input id="topCrop" type="range" min="0" max="20" value="7" step="1">
+<label>下端を無視</label><output id="bottomOut">7%</output>
+<input id="bottomCrop" type="range" min="0" max="20" value="7" step="1">
+<label>列間の余白</label><output id="gapOut">10px</output>
+<input id="gap" type="range" min="0" max="30" value="10" step="1">
+<label>列を分ける感度</label><output id="splitOut">70%</output>
+<input id="splitSensitivity" type="range" min="40" max="100" value="70" step="5">
+</div>
+</details>
 </header>
-<main id="main"><div id="reader"><div class="placeholder">スキャンした縦書き小説のPDFを選択してください。<br>本文を画像のまま拡大し、画面の高さを超える部分を次の縦列へ送ります。</div></div></main><div class="status" id="status"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.mjs" type="module"></script>
+<main id="main">
+<div id="reader"><div class="placeholder">スキャンした縦書き小説のPDFを選択してください。<br>本文を画像のまま拡大し、画面の高さを超える文字は次の縦列へ連続して流し込みます。</div></div>
+</main>
+<div class="status" id="status"></div>
 <script type="module">
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.mjs';
-const $=id=>document.getElementById(id), file=$('pdfFile'), reader=$('reader'), main=$('main'), status=$('status');
+
+const $=id=>document.getElementById(id);
+const file=$('pdfFile');
+const reader=$('reader');
+const main=$('main');
+const status=$('status');
 let pdf=null,pageNo=1,sourceCanvas=null,timer=null,renderToken=0;
-function toast(s){status.textContent=s;status.style.display='block';clearTimeout(status._t);status._t=setTimeout(()=>status.style.display='none',1800)}
-function sync(){ $('zoomOut').value=$('zoom').value+'%';$('topOut').value=$('topCrop').value+'%';$('bottomOut').value=$('bottomCrop').value+'%';$('gapOut').value=$('gap').value+'px'; }
-['zoom','topCrop','bottomCrop','gap'].forEach(id=>$(id).addEventListener('input',()=>{sync();clearTimeout(timer);timer=setTimeout(()=>sourceCanvas&&reflow(),100)}));sync();
-file.addEventListener('change',async()=>{if(!file.files[0])return;try{toast('PDFを読み込み中…');const data=await file.files[0].arrayBuffer();pdf=await pdfjsLib.getDocument({data}).promise;pageNo=1;await renderPage()}catch(e){console.error(e);toast('PDFを読み込めませんでした')}});
-$('prev').onclick=()=>go(-1);$('next').onclick=()=>go(1);async function go(d){if(!pdf)return;const n=Math.max(1,Math.min(pdf.numPages,pageNo+d));if(n===pageNo)return;pageNo=n;await renderPage()}
-async function renderPage(){const token=++renderToken;toast('ページを解析中…');const p=await pdf.getPage(pageNo);const vp=p.getViewport({scale:2.0});const c=document.createElement('canvas');c.width=Math.ceil(vp.width);c.height=Math.ceil(vp.height);await p.render({canvasContext:c.getContext('2d',{alpha:false}),viewport:vp}).promise;if(token!==renderToken)return;sourceCanvas=c;$('pageInfo').textContent=pageNo+' / '+pdf.numPages;reflow();main.scrollLeft=main.scrollWidth}
-function inkProjection(ctx,x0,y0,w,h){const im=ctx.getImageData(x0,y0,w,h),d=im.data,proj=new Uint32Array(w);for(let y=0;y<h;y+=2){for(let x=0;x<w;x++){let i=(y*w+x)*4;let lum=(d[i]*299+d[i+1]*587+d[i+2]*114)/1000;if(lum<205)proj[x]++}}return proj}
-function findColumns(c,y0,h){const ctx=c.getContext('2d',{willReadFrequently:true}),w=c.width,p=inkProjection(ctx,0,y0,w,h);let max=0;for(const v of p)if(v>max)max=v;const threshold=Math.max(2,max*.07),runs=[];let s=-1;for(let x=0;x<=w;x++){const on=x<w&&p[x]>threshold;if(on&&s<0)s=x;if(!on&&s>=0){if(x-s>=2)runs.push([s,x]);s=-1}}
-// 近接した文字幅のランを同じ縦列としてまとめる
-if(!runs.length)return [[0,w]];const widths=runs.map(r=>r[1]-r[0]).sort((a,b)=>a-b),med=widths[Math.floor(widths.length/2)]||8,mergeGap=Math.max(4,med*1.8);const merged=[];for(const r of runs){if(!merged.length||r[0]-merged[merged.length-1][1]>mergeGap)merged.push(r.slice());else merged[merged.length-1][1]=r[1]}
-// 極端に太い領域は複数列が結合した可能性があるため投影の谷で分割
-let cols=[];for(const r of merged){let rw=r[1]-r[0];if(rw<med*5){cols.push(r);continue}let a=r[0],last=a;for(let x=a+Math.round(med*2);x<r[1]-med;x++){if(p[x]<=threshold&&x-last>med*2){cols.push([last,x]);last=x}}cols.push([last,r[1]])}
-return cols.filter(r=>r[1]-r[0]>=Math.max(3,med*.5)).sort((a,b)=>b[0]-a[0])}
-function reflow(){if(!sourceCanvas)return;const c=sourceCanvas,top=+$('topCrop').value/100,bottom=+$('bottomCrop').value/100,y0=Math.round(c.height*top),y1=Math.round(c.height*(1-bottom)),h=Math.max(1,y1-y0),cols=findColumns(c,y0,h),zoom=+$('zoom').value/100,gap=+$('gap').value,usableH=Math.max(180,main.clientHeight-20),fragSrcH=Math.max(40,Math.floor(usableH/zoom));reader.innerHTML='';reader.style.gap=gap+'px';let count=0;
-for(const [x0,x1] of cols){const pad=Math.max(2,Math.round((x1-x0)*.12)),sx=Math.max(0,x0-pad),sw=Math.min(c.width-sx,(x1-x0)+pad*2);for(let sy=y0;sy<y1;sy+=fragSrcH){const sh=Math.min(fragSrcH,y1-sy),out=document.createElement('canvas');out.className='col';out.width=Math.ceil(sw*zoom);out.height=Math.ceil(sh*zoom);out.style.width=out.width+'px';out.style.height=out.height+'px';const oc=out.getContext('2d');oc.imageSmoothingEnabled=true;oc.imageSmoothingQuality='high';oc.fillStyle='#fff';oc.fillRect(0,0,out.width,out.height);oc.drawImage(c,sx,sy,sw,sh,0,0,out.width,out.height);reader.appendChild(out);count++}}
-if(!count){reader.innerHTML='<div class="placeholder">本文の列を認識できませんでした。<br>「本文領域の調整」で上下の除外率を変更してください。</div>'}main.scrollLeft=main.scrollWidth}
-window.addEventListener('resize',()=>{clearTimeout(timer);timer=setTimeout(()=>sourceCanvas&&reflow(),180)});
-</script></body></html>
+let touchStart=null;
+
+function toast(s){
+  status.textContent=s;
+  status.style.display='block';
+  clearTimeout(status._t);
+  status._t=setTimeout(()=>status.style.display='none',1800);
+}
+
+function sync(){
+  $('zoomOut').value=$('zoom').value+'%';
+  $('topOut').value=$('topCrop').value+'%';
+  $('bottomOut').value=$('bottomCrop').value+'%';
+  $('gapOut').value=$('gap').value+'px';
+  $('splitOut').value=$('splitSensitivity').value+'%';
+}
+
+['zoom','topCrop','bottomCrop','gap','splitSensitivity'].forEach(id=>{
+  $(id).addEventListener('input',()=>{
+    sync();
+    clearTimeout(timer);
+    timer=setTimeout(()=>sourceCanvas&&reflow(),120);
+  });
+});
+sync();
+
+file.addEventListener('change',async()=>{
+  if(!file.files[0])return;
+  try{
+    toast('PDFを読み込み中…');
+    const data=await file.files[0].arrayBuffer();
+    pdf=await pdfjsLib.getDocument({data}).promise;
+    pageNo=1;
+    await renderPage();
+  }catch(e){
+    console.error(e);
+    toast('PDFを読み込めませんでした');
+  }
+});
+
+$('prev').onclick=()=>go(-1);
+$('next').onclick=()=>go(1);
+
+async function go(d){
+  if(!pdf)return;
+  const n=Math.max(1,Math.min(pdf.numPages,pageNo+d));
+  if(n===pageNo)return;
+  pageNo=n;
+  await renderPage();
+}
+
+async function renderPage(){
+  const token=++renderToken;
+  toast('ページを解析中…');
+  const p=await pdf.getPage(pageNo);
+  const vp=p.getViewport({scale:2.2});
+  const c=document.createElement('canvas');
+  c.width=Math.ceil(vp.width);
+  c.height=Math.ceil(vp.height);
+  await p.render({canvasContext:c.getContext('2d',{alpha:false}),viewport:vp}).promise;
+  if(token!==renderToken)return;
+  sourceCanvas=c;
+  $('pageInfo').textContent=pageNo+' / '+pdf.numPages;
+  reflow();
+}
+
+// 本文領域を縦方向に走査し、xごとの黒画素量を求める。
+function inkProjection(ctx,x0,y0,w,h){
+  const im=ctx.getImageData(x0,y0,w,h);
+  const d=im.data;
+  const proj=new Float32Array(w);
+  for(let y=0;y<h;y+=2){
+    for(let x=0;x<w;x++){
+      const i=(y*w+x)*4;
+      const lum=(d[i]*299+d[i+1]*587+d[i+2]*114)/1000;
+      if(lum<205)proj[x]++;
+    }
+  }
+  return proj;
+}
+
+function smoothArray(src,radius){
+  const n=src.length,out=new Float32Array(n),sum=new Float64Array(n+1);
+  for(let i=0;i<n;i++)sum[i+1]=sum[i]+src[i];
+  for(let i=0;i<n;i++){
+    const a=Math.max(0,i-radius),b=Math.min(n,i+radius+1);
+    out[i]=(sum[b]-sum[a])/(b-a);
+  }
+  return out;
+}
+
+function percentile(values,q){
+  if(!values.length)return 0;
+  const a=Array.from(values).sort((x,y)=>x-y);
+  return a[Math.min(a.length-1,Math.max(0,Math.floor((a.length-1)*q)))];
+}
+
+// 小さな穴だけを埋める。隣り合う本文列の間まで結合しないことが重要。
+function closeSmallHoles(mask,maxHole){
+  const out=Uint8Array.from(mask);
+  let i=0;
+  while(i<out.length){
+    if(out[i]){i++;continue;}
+    const s=i;
+    while(i<out.length&&!out[i])i++;
+    const len=i-s;
+    if(s>0&&i<out.length&&len<=maxHole){
+      for(let x=s;x<i;x++)out[x]=1;
+    }
+  }
+  return out;
+}
+
+function runsFromMask(mask,minWidth){
+  const runs=[];
+  let s=-1;
+  for(let x=0;x<=mask.length;x++){
+    const on=x<mask.length&&mask[x];
+    if(on&&s<0)s=x;
+    if(!on&&s>=0){
+      if(x-s>=minWidth)runs.push([s,x]);
+      s=-1;
+    }
+  }
+  return runs;
+}
+
+// 太すぎる候補は、投影値が最も低い「谷」で再帰的に分割する。
+function splitWideRun(run,smoothed,typical,sensitivity){
+  const [a,b]=run;
+  const width=b-a;
+  if(width<=typical*1.55)return [run];
+  const edge=Math.max(3,Math.round(typical*.45));
+  let minX=-1,minV=Infinity;
+  for(let x=a+edge;x<=b-edge;x++){
+    if(smoothed[x]<minV){minV=smoothed[x];minX=x;}
+  }
+  if(minX<0)return [run];
+  let localPeak=0;
+  for(let x=a;x<b;x++)if(smoothed[x]>localPeak)localPeak=smoothed[x];
+  const valleyRatio=localPeak?minV/localPeak:1;
+  // 感度が高いほど浅い谷でも分割する。
+  const allowed=.18+(sensitivity/100)*.42;
+  const force=width>typical*2.25;
+  if(!force&&valleyRatio>allowed)return [run];
+  const left=[a,minX],right=[minX,b];
+  if(left[1]-left[0]<typical*.45||right[1]-right[0]<typical*.45)return [run];
+  return [
+    ...splitWideRun(left,smoothed,typical,sensitivity),
+    ...splitWideRun(right,smoothed,typical,sensitivity)
+  ];
+}
+
+function findColumns(c,y0,h){
+  const ctx=c.getContext('2d',{willReadFrequently:true});
+  const w=c.width;
+  const raw=inkProjection(ctx,0,y0,w,h);
+  // 文字の細い縦線単位ではなく、文字列全体の帯として見るため軽く平滑化する。
+  const radius=Math.max(1,Math.round(w/900));
+  const p=smoothArray(raw,radius);
+  const positive=Array.from(p).filter(v=>v>0);
+  if(!positive.length)return [];
+  const peak=percentile(positive,.98);
+  const sensitivity=+$('splitSensitivity').value;
+  // 感度が高いほど列間の薄い部分を空白として扱いやすくする。
+  const threshold=peak*(.075+(sensitivity/100)*.055);
+  let mask=new Uint8Array(w);
+  for(let x=0;x<w;x++)mask[x]=p[x]>threshold?1:0;
+  const maxHole=Math.max(2,Math.round(w*.0025));
+  mask=closeSmallHoles(mask,maxHole);
+  let runs=runsFromMask(mask,Math.max(3,Math.round(w*.003)));
+  if(!runs.length)return [];
+
+  let widths=runs.map(r=>r[1]-r[0]);
+  // 幅の小さい側を基準にし、2列が結合した候補に中央値を引っ張られにくくする。
+  const p45=percentile(widths,.45);
+  const narrow=widths.filter(v=>v<=Math.max(p45,1));
+  let typical=percentile(narrow.length?narrow:widths,.55)||Math.max(6,w*.02);
+  typical=Math.max(5,typical);
+
+  const split=[];
+  for(const r of runs)split.push(...splitWideRun(r,p,typical,sensitivity));
+
+  // 非常に細いノイズを除き、右から左の読書順に並べる。
+  const minCol=Math.max(4,typical*.42);
+  return split
+    .filter(r=>r[1]-r[0]>=minCol)
+    .sort((a,b)=>b[0]-a[0]);
+}
+
+function buildSourceColumns(c,cols,y0,y1){
+  return cols.map(([x0,x1])=>{
+    const colW=x1-x0;
+    const pad=Math.max(2,Math.round(colW*.10));
+    const sx=Math.max(0,x0-pad);
+    const sw=Math.min(c.width-sx,colW+pad*2);
+    return {sx,sw,sy:y0,sh:y1-y0};
+  });
+}
+
+// 原稿の各縦列を一続きの読み順ストリームとして扱い、
+// 画面下に空きがあれば次の原稿列の先頭をそのまま流し込む。
+function renderContinuousFlow(c,sourceCols,zoom,usableH,gap){
+  reader.innerHTML='';
+  reader.style.gap=gap+'px';
+  const targetSrcH=Math.max(40,usableH/zoom);
+  let colIndex=0;
+  let offset=0;
+  let outCount=0;
+
+  while(colIndex<sourceCols.length){
+    let need=targetSrcH;
+    let used=0;
+    const chunks=[];
+    let maxW=0;
+
+    while(need>.5&&colIndex<sourceCols.length){
+      const src=sourceCols[colIndex];
+      const remain=src.sh-offset;
+      const take=Math.min(need,remain);
+      chunks.push({src,sourceY:src.sy+offset,sourceH:take,destY:used});
+      maxW=Math.max(maxW,src.sw);
+      used+=take;
+      need-=take;
+      offset+=take;
+      if(offset>=src.sh-.5){
+        colIndex++;
+        offset=0;
+      }
+    }
+
+    if(!chunks.length)break;
+    const out=document.createElement('canvas');
+    out.className='col';
+    out.width=Math.max(1,Math.ceil(maxW*zoom));
+    out.height=Math.max(1,Math.ceil(used*zoom));
+    out.style.width=out.width+'px';
+    out.style.height=out.height+'px';
+    const oc=out.getContext('2d');
+    oc.imageSmoothingEnabled=true;
+    oc.imageSmoothingQuality='high';
+    oc.fillStyle='#fff';
+    oc.fillRect(0,0,out.width,out.height);
+
+    for(const ch of chunks){
+      const dw=Math.ceil(ch.src.sw*zoom);
+      const dh=Math.ceil(ch.sourceH*zoom);
+      const dx=Math.floor((out.width-dw)/2);
+      const dy=Math.round(ch.destY*zoom);
+      oc.drawImage(c,ch.src.sx,ch.sourceY,ch.src.sw,ch.sourceH,dx,dy,dw,dh);
+    }
+    reader.appendChild(out);
+    outCount++;
+  }
+  return outCount;
+}
+
+function reflow(){
+  if(!sourceCanvas)return;
+  const c=sourceCanvas;
+  const top=+$('topCrop').value/100;
+  const bottom=+$('bottomCrop').value/100;
+  const y0=Math.round(c.height*top);
+  const y1=Math.round(c.height*(1-bottom));
+  const h=Math.max(1,y1-y0);
+  const cols=findColumns(c,y0,h);
+  const zoom=+$('zoom').value/100;
+  const gap=+$('gap').value;
+  const usableH=Math.max(180,main.clientHeight-20);
+
+  if(!cols.length){
+    reader.innerHTML='<div class="placeholder">本文の列を認識できませんでした。<br>「本文領域・列認識の調整」で上下の除外率または列を分ける感度を変更してください。</div>';
+    return;
+  }
+
+  const sourceCols=buildSourceColumns(c,cols,y0,y1);
+  const count=renderContinuousFlow(c,sourceCols,zoom,usableH,gap);
+  if(!count){
+    reader.innerHTML='<div class="placeholder">本文を再配置できませんでした。</div>';
+    return;
+  }
+  requestAnimationFrame(()=>{main.scrollLeft=main.scrollWidth;});
+}
+
+// iPhoneの横スワイプ。
+// 現在ページのリフロー列を右方向に読み進め、左端まで到達した状態でさらに右へスワイプすると次のPDFページへ進む。
+main.addEventListener('touchstart',e=>{
+  if(e.touches.length!==1)return;
+  const t=e.touches[0];
+  touchStart={x:t.clientX,y:t.clientY,time:Date.now(),scrollLeft:main.scrollLeft};
+},{passive:true});
+
+main.addEventListener('touchend',e=>{
+  if(!touchStart||!e.changedTouches.length)return;
+  const t=e.changedTouches[0];
+  const dx=t.clientX-touchStart.x;
+  const dy=t.clientY-touchStart.y;
+  const dt=Date.now()-touchStart.time;
+  const startScroll=touchStart.scrollLeft;
+  touchStart=null;
+  if(dt>900||Math.abs(dx)<65||Math.abs(dx)<Math.abs(dy)*1.25)return;
+  const noHorizontalOverflow=main.scrollWidth<=main.clientWidth+6;
+  if(dx>0&&(noHorizontalOverflow||startScroll<=8)){
+    go(1);
+  }
+});
+
+window.addEventListener('resize',()=>{
+  clearTimeout(timer);
+  timer=setTimeout(()=>sourceCanvas&&reflow(),180);
+});
+</script>
+</body>
+</html>
