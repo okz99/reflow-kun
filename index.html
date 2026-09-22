@@ -438,21 +438,28 @@ function makeSafeCutData(rowInk,contentTop,contentBottom,estimatedChar,sw){
   const local=new Float32Array(n);
   for(let i=0;i<n;i++)local[i]=rowInk[contentTop+i];
 
-  // 文字内部の細い白線を文字間と誤認しないよう、黒画素行を上下に少し膨張させる。
-  const activeThreshold=Math.max(1,sw*.018);
+  // 1文字の内部にある細い白線や、スキャンのかすれによる隙間を文字間と誤認しないようにする。
+  // 行ごとの黒画素数を少し平滑化し、ある程度まとまった高さの白帯だけを切れ目候補にする。
+  const smoothed=smoothArray(local,1);
+  const positive=Array.from(smoothed).filter(v=>v>0);
+  const localPeak=positive.length?percentile(positive,.86):0;
+  const activeThreshold=Math.max(1,Math.min(sw*.11,localPeak*.16));
   let active=new Uint8Array(n);
-  for(let i=0;i<n;i++)active[i]=local[i]>=activeThreshold?1:0;
-  const guard=Math.max(1,Math.round(estimatedChar*.075));
+  for(let i=0;i<n;i++)active[i]=smoothed[i]>=activeThreshold?1:0;
+
+  // 文字の中の空洞や濁点・半濁点との隙間はつなげて扱う。
+  const guard=Math.max(2,Math.round(estimatedChar*.16));
   const guarded=dilateRows(active,guard);
 
   const cutPoints=[0];
+  const minBlankRun=Math.max(3,Math.round(estimatedChar*.16));
   let i=0;
   while(i<n){
     if(guarded[i]){i++;continue;}
     const a=i;
     while(i<n&&!guarded[i])i++;
     const b=i;
-    if(b-a>=1){
+    if(b-a>=minBlankRun){
       const cp=Math.round((a+b)/2);
       if(cp>2&&cp<n-2)cutPoints.push(cp);
     }
@@ -460,12 +467,11 @@ function makeSafeCutData(rowInk,contentTop,contentBottom,estimatedChar,sw){
   cutPoints.push(n);
   cutPoints.sort((a,b)=>a-b);
 
-  // 強制切断が必要になった場合のため、分割線周辺の黒画素量を評価する。
-  // 1行だけ白くても、その直上直下に文字があれば高得点になり、切断位置に選ばれにくい。
+  // 強制切断が必要な場合は、その行だけでなく上下の広い範囲も見て安全性を評価する。
   const seamScore=new Float32Array(n);
-  const seamRadius=Math.max(1,Math.round(estimatedChar*.055));
+  const seamRadius=Math.max(2,Math.round(estimatedChar*.20));
   const prefix=new Float64Array(n+1);
-  for(let y=0;y<n;y++)prefix[y+1]=prefix[y]+local[y];
+  for(let y=0;y<n;y++)prefix[y+1]=prefix[y]+smoothed[y];
   for(let y=0;y<n;y++){
     const a=Math.max(0,y-seamRadius),b=Math.min(n,y+seamRadius+1);
     seamScore[y]=(prefix[b]-prefix[a])/(b-a);
@@ -605,47 +611,46 @@ function chooseTake(src,offset,limit){
   const remain=src.sh-offset;
   if(remain<=limit+.5)return remain;
 
-  const target=Math.min(src.sh,offset+limit);
   const charH=Math.max(8,src.estimatedChar);
-  const minTake=Math.min(limit,Math.max(charH*.38,8));
+  const minTake=Math.min(limit,Math.max(charH*.52,10));
+  const target=Math.min(src.sh,offset+limit);
+  const softTarget=Math.max(offset+minTake,target-charH*.25);
   const minCp=offset+minTake;
 
-  // 最優先は、文字の上下に十分な白さがある安全な切れ目。
+  // 最優先は、十分な高さの白帯の中央で切ること。
   let best=-1;
   for(const cp of src.cutPoints){
     if(cp<=minCp)continue;
-    if(cp<=target)best=cp;
+    if(cp<=softTarget)best=cp;
     else break;
   }
   if(best>offset)return best-offset;
 
-  // 安全な白帯が見つからない場合も指定高さでそのまま切らない。
-  // 目標位置の手前約1.3文字分から、前後を含めて黒画素量が最小の位置を探す。
+  // 目標より少し手前まで含めて、上下方向に広く見た安全度が最小の位置を探す。
   const score=src.seamScore;
   if(score&&score.length){
-    const lo=Math.max(Math.ceil(minCp),Math.floor(target-charH*1.35));
-    const hi=Math.max(lo,Math.floor(target-charH*.08));
+    const lo=Math.max(Math.ceil(minCp),Math.floor(target-charH*1.8));
+    const hi=Math.max(lo,Math.floor(target-charH*.30));
     let bestY=-1,bestScore=Infinity;
     for(let y=lo;y<=hi&&y<score.length;y++){
-      const distancePenalty=(target-y)/(charH*8);
-      const v=score[y]+distancePenalty;
+      const distancePenalty=(softTarget-y)/(charH*10);
+      const v=score[y]+Math.max(0,distancePenalty);
       if(v<bestScore){bestScore=v;bestY=y;}
     }
-    if(bestY>offset+2)return bestY-offset;
+    if(bestY>offset+3)return bestY-offset;
 
-    // さらに広い範囲で最も安全な場所を探す。
-    const lo2=Math.ceil(minCp),hi2=Math.min(score.length-1,Math.floor(target-2));
+    // それでも安全な位置が見つからなければ、もっと短めに切って文字の分断を避ける。
+    const hi2=Math.max(Math.ceil(minCp),Math.floor(target-charH*.9));
     bestY=-1;bestScore=Infinity;
-    for(let y=lo2;y<=hi2;y++){
-      const v=score[y]+(target-y)/(charH*18);
+    for(let y=Math.ceil(minCp);y<=hi2&&y<score.length;y++){
+      const v=score[y]+(hi2-y)/(charH*20);
       if(v<bestScore){bestScore=v;bestY=y;}
     }
-    if(bestY>offset+2)return bestY-offset;
+    if(bestY>offset+3)return bestY-offset;
   }
 
-  // ここまで候補がない場合は文字中央を切るより、1文字分手前で短く終える。
-  // 出力列の下に少し余白ができても、文字を上下に分断しないことを優先する。
-  const conservative=Math.max(minTake,limit-charH*.75);
+  // 最後の保険。1文字近く余らせても、文字を上下に裂かない側を優先する。
+  const conservative=Math.max(minTake,limit-charH*1.10);
   return Math.max(3,Math.min(remain,conservative));
 }
 
