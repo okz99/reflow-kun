@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
-<title>縦書きPDF 画像リフロー</title>
+<title>縦書きPDF 画像リフロー・続きから再開</title>
 <style>
 :root{--bg:#f5f5f2;--panel:#fff;--ink:#191919;--line:#d8d8d3;--shadow:0 12px 36px rgba(0,0,0,.18)}
 *{box-sizing:border-box}
@@ -47,7 +47,7 @@ main{position:fixed;left:0;right:0;top:calc(52px + env(safe-area-inset-top));bot
 <div id="settingsOverlay" aria-hidden="true">
   <section id="settingsPanel" role="dialog" aria-modal="true" aria-label="設定">
     <div class="panelHead"><strong>設定</strong><button class="iconBtn" id="closeSettings" aria-label="閉じる">×</button></div>
-    <label class="file"><span>PDFを選択</span><input id="pdfFile" type="file" accept="application/pdf"></label>
+    <label class="file"><span id="fileLabel">PDFを選択</span><input id="pdfFile" type="file" accept="application/pdf"></label>
     <div class="pageRow">
       <button class="btn" id="prev">前のページ</button>
       <span class="pageInfo" id="pageInfo">— / —</span>
@@ -78,6 +78,7 @@ main{position:fixed;left:0;right:0;top:calc(52px + env(safe-area-inset-top));bot
       <input id="splitSensitivity" type="range" min="40" max="100" value="75" step="5">
     </div>
     <div class="help">白い余白そのものは文字としてリフローしません。改行は列途中の空白では判定せず、原文で次の縦列が約1文字下がって始まる場合、または「のような行頭記号らしい形で始まる場合を優先して段落先頭として扱います。</div>
+    <div class="help">選択したPDFと最後に読んだページはこの端末内に自動保存されます。次回はPDFを選び直さず、続きのページから再開します。</div>
   </section>
 </div>
 
@@ -94,6 +95,109 @@ const status=$('status');
 const overlay=$('settingsOverlay');
 let pdf=null,pageNo=1,sourceCanvas=null,timer=null,renderToken=0;
 let touchStart=null;
+
+// PDF本体はIndexedDB、ページ番号と設定はlocalStorageへ保存する。
+const DB_NAME='verticalPdfReflowDB';
+const DB_VERSION=1;
+const STORE_NAME='books';
+const BOOK_KEY='currentBook';
+const STATE_KEY='verticalPdfReflowStateV2';
+let currentFileName='';
+
+function readSavedState(){
+  try{
+    return JSON.parse(localStorage.getItem(STATE_KEY)||'{}')||{};
+  }catch(e){
+    console.warn('保存状態を読み込めませんでした',e);
+    return {};
+  }
+}
+
+function applySavedSettings(){
+  const s=readSavedState();
+  const ids=['zoom','topCrop','bottomCrop','gap','splitSensitivity'];
+  for(const id of ids){
+    if(s[id]===undefined)continue;
+    const el=$(id);
+    const n=Number(s[id]);
+    if(!Number.isFinite(n))continue;
+    const min=Number(el.min),max=Number(el.max);
+    el.value=String(Math.max(min,Math.min(max,n)));
+  }
+}
+
+function saveState(){
+  try{
+    const s={
+      pageNo,
+      zoom:+$('zoom').value,
+      topCrop:+$('topCrop').value,
+      bottomCrop:+$('bottomCrop').value,
+      gap:+$('gap').value,
+      splitSensitivity:+$('splitSensitivity').value,
+      fileName:currentFileName,
+      updatedAt:Date.now()
+    };
+    localStorage.setItem(STATE_KEY,JSON.stringify(s));
+  }catch(e){
+    console.warn('読書位置を保存できませんでした',e);
+  }
+}
+
+function openBookDB(){
+  return new Promise((resolve,reject)=>{
+    if(!('indexedDB' in window)){
+      reject(new Error('IndexedDB非対応'));
+      return;
+    }
+    const req=indexedDB.open(DB_NAME,DB_VERSION);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains(STORE_NAME))db.createObjectStore(STORE_NAME,{keyPath:'id'});
+    };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error||new Error('IndexedDBを開けませんでした'));
+  });
+}
+
+async function savePdfToDevice(blob,name){
+  const db=await openBookDB();
+  try{
+    await new Promise((resolve,reject)=>{
+      const tx=db.transaction(STORE_NAME,'readwrite');
+      tx.objectStore(STORE_NAME).put({id:BOOK_KEY,blob,name:name||'保存したPDF',savedAt:Date.now()});
+      tx.oncomplete=()=>resolve();
+      tx.onerror=()=>reject(tx.error||new Error('PDFを保存できませんでした'));
+      tx.onabort=()=>reject(tx.error||new Error('PDFの保存が中断されました'));
+    });
+  }finally{
+    db.close();
+  }
+}
+
+async function loadPdfFromDevice(){
+  const db=await openBookDB();
+  try{
+    return await new Promise((resolve,reject)=>{
+      const tx=db.transaction(STORE_NAME,'readonly');
+      const req=tx.objectStore(STORE_NAME).get(BOOK_KEY);
+      req.onsuccess=()=>resolve(req.result||null);
+      req.onerror=()=>reject(req.error||new Error('保存したPDFを読み込めませんでした'));
+    });
+  }finally{
+    db.close();
+  }
+}
+
+async function requestPersistentStorage(){
+  try{
+    if(navigator.storage&&navigator.storage.persist){
+      await navigator.storage.persist();
+    }
+  }catch(e){
+    console.warn('永続ストレージを要求できませんでした',e);
+  }
+}
 
 function openSettings(){overlay.classList.add('open');overlay.setAttribute('aria-hidden','false')}
 function closeSettings(){overlay.classList.remove('open');overlay.setAttribute('aria-hidden','true')}
@@ -116,9 +220,11 @@ function sync(){
   $('splitOut').value=$('splitSensitivity').value+'%';
 }
 
+applySavedSettings();
 ['zoom','topCrop','bottomCrop','gap','splitSensitivity'].forEach(id=>{
   $(id).addEventListener('input',()=>{
     sync();
+    saveState();
     clearTimeout(timer);
     timer=setTimeout(()=>sourceCanvas&&reflow(),120);
   });
@@ -128,12 +234,20 @@ sync();
 file.addEventListener('change',async()=>{
   if(!file.files[0])return;
   try{
+    const selected=file.files[0];
     toast('PDFを読み込み中…');
-    const data=await file.files[0].arrayBuffer();
-    pdf=await pdfjsLib.getDocument({data}).promise;
+    const data=await selected.arrayBuffer();
+    const loadedPdf=await pdfjsLib.getDocument({data}).promise;
+    pdf=loadedPdf;
     pageNo=1;
+    currentFileName=selected.name||'保存したPDF';
+    $('fileLabel').textContent=currentFileName;
+    await savePdfToDevice(selected,currentFileName);
+    saveState();
+    await requestPersistentStorage();
     await renderPage();
     closeSettings();
+    toast('PDFと読書位置を保存しました');
   }catch(e){
     console.error(e);
     toast('PDFを読み込めませんでした');
@@ -148,6 +262,7 @@ async function go(d){
   const n=Math.max(1,Math.min(pdf.numPages,pageNo+d));
   if(n===pageNo)return;
   pageNo=n;
+  saveState();
   await renderPage();
 }
 
@@ -165,6 +280,7 @@ async function renderPage(){
   const info=pageNo+' / '+pdf.numPages;
   $('pageInfo').textContent=info;
   $('pageBadge').textContent=info;
+  saveState();
   reflow();
 }
 
@@ -588,6 +704,35 @@ window.addEventListener('resize',()=>{
   clearTimeout(timer);
   timer=setTimeout(()=>sourceCanvas&&reflow(),180);
 });
+
+window.addEventListener('pagehide',saveState);
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='hidden')saveState();
+});
+
+async function restoreLastBook(){
+  try{
+    const saved=await loadPdfFromDevice();
+    if(!saved||!saved.blob)return;
+    toast('前回のPDFを復元中…');
+    const data=await saved.blob.arrayBuffer();
+    pdf=await pdfjsLib.getDocument({data}).promise;
+    currentFileName=saved.name||readSavedState().fileName||'保存したPDF';
+    $('fileLabel').textContent=currentFileName;
+    const state=readSavedState();
+    const restoredPage=Number(state.pageNo)||1;
+    pageNo=Math.max(1,Math.min(pdf.numPages,Math.round(restoredPage)));
+    await renderPage();
+    toast('前回の続きから再開しました');
+  }catch(e){
+    console.error(e);
+    // 保存データが壊れていても、新しいPDFは通常どおり選択できる。
+    toast('保存したPDFを復元できませんでした');
+  }
+}
+
+requestPersistentStorage();
+restoreLastBook();
 </script>
 </body>
 </html>
