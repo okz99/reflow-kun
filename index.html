@@ -9,12 +9,12 @@
 *{box-sizing:border-box}
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif}
 button,input{font:inherit}
-main{position:fixed;inset:0;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;touch-action:pan-x;background:var(--bg)}
-#reader{height:100%;display:flex;flex-direction:row-reverse;align-items:flex-start;gap:10px;padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));width:max-content;min-width:100%}
+main{position:fixed;left:0;right:0;top:calc(52px + env(safe-area-inset-top));bottom:0;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;touch-action:pan-x;background:var(--bg)}
+#reader{height:100%;display:flex;flex-direction:row-reverse;align-items:flex-start;gap:10px;padding:8px 12px calc(12px + env(safe-area-inset-bottom));width:max-content;min-width:100%}
 .col{display:block;flex:none;background:#fff}
 .placeholder{width:100vw;padding:88px 28px 40px;text-align:center;color:#777;line-height:1.8;font-size:14px}
-#settingsButton{position:fixed;z-index:50;right:calc(10px + env(safe-area-inset-right));top:calc(10px + env(safe-area-inset-top));width:38px;height:38px;border:1px solid rgba(0,0,0,.2);border-radius:50%;background:rgba(255,255,255,.88);backdrop-filter:blur(10px);box-shadow:0 3px 14px rgba(0,0,0,.12);font-size:19px;line-height:1;padding:0;color:#222}
-#pageBadge{position:fixed;z-index:40;left:50%;top:calc(12px + env(safe-area-inset-top));transform:translateX(-50%);background:rgba(255,255,255,.78);backdrop-filter:blur(8px);border:1px solid rgba(0,0,0,.12);border-radius:999px;padding:5px 10px;font-size:11px;color:#555;font-variant-numeric:tabular-nums;pointer-events:none}
+#settingsButton{position:fixed;z-index:50;right:calc(10px + env(safe-area-inset-right));top:calc(7px + env(safe-area-inset-top));width:38px;height:38px;border:1px solid rgba(0,0,0,.2);border-radius:50%;background:rgba(255,255,255,.96);backdrop-filter:blur(10px);box-shadow:0 2px 10px rgba(0,0,0,.10);font-size:19px;line-height:1;padding:0;color:#222}
+#pageBadge{position:fixed;z-index:40;left:calc(12px + env(safe-area-inset-left));top:calc(12px + env(safe-area-inset-top));background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border:1px solid rgba(0,0,0,.12);border-radius:999px;padding:4px 9px;font-size:11px;color:#555;font-variant-numeric:tabular-nums;pointer-events:none}
 #settingsOverlay{position:fixed;z-index:60;inset:0;background:rgba(0,0,0,.28);display:none;align-items:flex-end;justify-content:center;padding:0}
 #settingsOverlay.open{display:flex}
 #settingsPanel{width:min(640px,100%);max-height:86dvh;overflow:auto;background:var(--panel);border-radius:20px 20px 0 0;box-shadow:var(--shadow);padding:14px 16px calc(16px + env(safe-area-inset-bottom))}
@@ -77,7 +77,7 @@ main{position:fixed;inset:0;overflow-x:auto;overflow-y:hidden;overscroll-behavio
       <label for="splitSensitivity">列を分ける感度</label><output id="splitOut">75%</output>
       <input id="splitSensitivity" type="range" min="40" max="100" value="75" step="5">
     </div>
-    <div class="help">白い余白は本文として拡大せず、各縦列の実際の文字範囲だけを使います。原稿で段落末など大きな空白がある場合は改行として保持し、次の段落を無理に同じリフロー列へ詰めません。</div>
+    <div class="help">白い余白そのものは文字としてリフローしません。改行は列途中の空白では判定せず、原文で次の縦列が約1文字下がって始まる場合、または「のような行頭記号らしい形で始まる場合を優先して段落先頭として扱います。</div>
   </section>
 </div>
 
@@ -280,7 +280,7 @@ function findColumns(c,y0,h){
 }
 
 // 各縦列について、実際に文字がある上下範囲だけを抽出する。
-// 長い末尾余白は「原文の改行」とみなし、次の原稿列を同じ出力列へ詰め込まない。
+// 空白そのものは文字として運ばない。行頭判定に必要な上下余白量だけ数値として保持する。
 function analyzeSourceColumn(c,x0,x1,y0,y1){
   const ctx=c.getContext('2d',{willReadFrequently:true});
   const colW=x1-x0;
@@ -309,8 +309,8 @@ function analyzeSourceColumn(c,x0,x1,y0,y1){
   let mask=new Uint8Array(h);
   for(let y=0;y<h;y++)mask[y]=smooth[y]>=threshold?1:0;
 
-  // 文字間の通常の空白は埋め、段落末など長い空白だけを残す。
   const estimatedChar=Math.max(8,colW*1.05);
+  // 通常の文字間だけを埋める。長い白帯を文章とはみなさない。
   mask=closeSmallHoles(mask,Math.max(2,Math.round(estimatedChar*.62)));
 
   let first=-1,last=-1;
@@ -323,18 +323,44 @@ function analyzeSourceColumn(c,x0,x1,y0,y1){
   const contentBottom=Math.min(h,last+1+padY);
   const trailingBlank=Math.max(0,h-(last+1));
   const leadingBlank=Math.max(0,first);
-  const hardBreakAfter=trailingBlank>estimatedChar*1.55;
 
-  // 文字を途中で切りにくくするため、文字間の横白帯を分割候補として記録する。
+  // 行頭の「を画像だけで補助判定する。
+  // OCRは使わず、先頭1文字が通常文字より小さく、上側にまとまる角括弧状の字形を候補にする。
+  const glyphH=Math.max(4,Math.min(h-first,Math.round(estimatedChar*1.05)));
+  let gx0=sw,gy0=glyphH,gx1=-1,gy1=-1,inkCount=0;
+  for(let yy=0;yy<glyphH;yy++){
+    const y=first+yy;
+    for(let x=0;x<sw;x++){
+      const i=(y*sw+x)*4;
+      const lum=(d[i]*299+d[i+1]*587+d[i+2]*114)/1000;
+      if(lum<190){
+        inkCount++;
+        if(x<gx0)gx0=x;
+        if(x>gx1)gx1=x;
+        if(yy<gy0)gy0=yy;
+        if(yy>gy1)gy1=yy;
+      }
+    }
+  }
+  const glyphBoxH=gy1>=gy0?(gy1-gy0+1):glyphH;
+  const glyphBoxW=gx1>=gx0?(gx1-gx0+1):sw;
+  const glyphDensity=inkCount/Math.max(1,sw*glyphH);
+  const firstGlyphQuoteLike=
+    inkCount>2 &&
+    glyphBoxH<estimatedChar*.68 &&
+    glyphBoxW<sw*.78 &&
+    glyphDensity<.16;
+
+  // 文字を途中で切らないため、文字間の白帯を分割候補として記録する。
   const cutPoints=[0];
   let y=contentTop;
   while(y<contentBottom){
     if(mask[y]){y++;continue;}
-    const s=y;
+    const bs=y;
     while(y<contentBottom&&!mask[y])y++;
-    const len=y-s;
+    const len=y-bs;
     if(len>=Math.max(2,estimatedChar*.08)){
-      const center=Math.round((s+y)/2)-contentTop;
+      const center=Math.round((bs+y)/2)-contentTop;
       if(center>2&&center<(contentBottom-contentTop)-2)cutPoints.push(center);
     }
   }
@@ -345,9 +371,12 @@ function analyzeSourceColumn(c,x0,x1,y0,y1){
     sx,sw,
     sy:y0+contentTop,
     sh:contentBottom-contentTop,
-    hardBreakAfter,
     leadingBlank,
+    trailingBlank,
     estimatedChar,
+    firstGlyphQuoteLike,
+    paragraphBreakBefore:false,
+    indentStart:false,
     cutPoints
   };
 }
@@ -357,6 +386,37 @@ function buildSourceColumns(c,cols,y0,y1){
   for(const [x0,x1] of cols){
     const a=analyzeSourceColumn(c,x0,x1,y0,y1);
     if(a&&a.sh>3)out.push(a);
+  }
+  if(!out.length)return out;
+
+  // ページ全体に共通する上下余白を差し引いてから、約1文字分の字下げを判定する。
+  const leads=out.map(v=>v.leadingBlank);
+  const trails=out.map(v=>v.trailingBlank);
+  const baseLead=percentile(leads,.18);
+  const baseTrail=percentile(trails,.18);
+
+  for(let i=0;i<out.length;i++){
+    const cur=out[i];
+    const charH=Math.max(8,cur.estimatedChar);
+    const extraLead=Math.max(0,cur.leadingBlank-baseLead);
+    const indented=extraLead>=charH*.55 && extraLead<=charH*1.65;
+    cur.indentStart=indented;
+
+    if(i===0){
+      cur.paragraphBreakBefore=false;
+      continue;
+    }
+
+    const prev=out[i-1];
+    const prevChar=Math.max(8,prev.estimatedChar);
+    const extraTrail=Math.max(0,prev.trailingBlank-baseTrail);
+
+    // 改行は次の3条件に限定する。
+    // 1) 次列が約1文字分下がって始まる。
+    // 2) 次列先頭が「らしい小さな字形で始まる。
+    // 3) 前列末尾に通常より1文字以上の明確な空きがある。
+    const endedEarly=extraTrail>=prevChar*.95;
+    cur.paragraphBreakBefore=indented || cur.firstGlyphQuoteLike || endedEarly;
   }
   return out;
 }
@@ -377,8 +437,7 @@ function chooseTake(src,offset,limit){
 }
 
 // 原稿列を読み順に流す。
-// 通常の列末は次の原稿列を残りスペースへ流し込む。
-// 原文で大きな末尾空白がある列は段落改行として保持する。
+// 原稿の通常の列境界は連続して詰めるが、段落先頭だけは新しい出力列から始める。
 function renderFlow(c,sourceCols,zoom,usableH,gap){
   reader.innerHTML='';
   reader.style.gap=gap+'px';
@@ -392,10 +451,20 @@ function renderFlow(c,sourceCols,zoom,usableH,gap){
     let used=0;
     const chunks=[];
     let maxW=0;
-    let forceOutputBreak=false;
 
     while(need>.5&&colIndex<sourceCols.length){
       const src=sourceCols[colIndex];
+
+      // 段落先頭は原文の改行を保持し、前段落の末尾へ流し込まない。
+      if(offset===0&&src.paragraphBreakBefore&&chunks.length)break;
+
+      // 1文字字下げの段落は、白い画像をコピーせず意味のある1文字分だけ空ける。
+      if(offset===0&&src.indentStart&&used===0){
+        const indent=Math.min(need,src.estimatedChar);
+        used+=indent;
+        need-=indent;
+      }
+
       const take=chooseTake(src,offset,need);
       if(take<=.5)break;
 
@@ -406,19 +475,26 @@ function renderFlow(c,sourceCols,zoom,usableH,gap){
       offset+=take;
 
       if(offset>=src.sh-.5){
-        const hardBreak=src.hardBreakAfter;
         colIndex++;
         offset=0;
-        if(hardBreak){
-          forceOutputBreak=true;
-          break;
-        }
       }
     }
 
     if(!chunks.length){
-      if(colIndex<sourceCols.length){colIndex++;offset=0;continue;}
-      break;
+      // 字下げだけで高さを使い切るような異常値を避ける。
+      if(colIndex<sourceCols.length){
+        const src=sourceCols[colIndex];
+        const take=chooseTake(src,offset,targetSrcH);
+        if(take>.5){
+          chunks.push({src,sourceY:src.sy+offset,sourceH:take,destY:0});
+          maxW=Math.max(maxW,src.sw);
+          used=take;
+          offset+=take;
+          if(offset>=src.sh-.5){colIndex++;offset=0;}
+        }else{
+          colIndex++;offset=0;continue;
+        }
+      }else break;
     }
 
     const out=document.createElement('canvas');
@@ -442,8 +518,6 @@ function renderFlow(c,sourceCols,zoom,usableH,gap){
     }
     reader.appendChild(out);
     outCount++;
-
-    if(forceOutputBreak)continue;
   }
   return outCount;
 }
@@ -459,7 +533,7 @@ function reflow(){
   const cols=findColumns(c,y0,h);
   const zoom=+$('zoom').value/100;
   const gap=+$('gap').value;
-  const usableH=Math.max(180,main.clientHeight-24);
+  const usableH=Math.max(180,main.clientHeight-16);
 
   if(!cols.length){
     reader.innerHTML='<div class="placeholder">本文の列を認識できませんでした。<br>⚙から上下の除外率または列を分ける感度を変更してください。</div>';
