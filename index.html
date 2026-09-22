@@ -80,11 +80,7 @@ main{position:fixed;left:0;right:0;top:0;bottom:calc(54px + env(safe-area-inset-
       <label for="splitSensitivity">列を分ける感度</label><output id="splitOut">75%</output>
       <input id="splitSensitivity" type="range" min="40" max="100" value="75" step="5">
     </div>
-    <div class="setting">
-      <label for="cutProtection">文字分離防止</label><output id="cutProtectionOut">85%</output>
-      <input id="cutProtection" type="range" min="0" max="100" value="85" step="5">
-    </div>
-    <div class="help">白い余白そのものは文字としてリフローしません。文字の上下が分断されないよう、文字間の安全な白い谷を探してから分割します。「文字分離防止」を上げるほど文字内部の白い隙間では切れにくくなります。この設定は段落や改行判定には影響しません。改行は列途中の空白では判定せず、原文で次の縦列が約1文字下がって始まる場合、または「のような行頭記号らしい形で始まる場合を優先して段落先頭として扱います。</div>
+    <div class="help">白い余白そのものは文字としてリフローしません。文字の上下が分断されないよう、文字間の安全な白い谷を探してから分割します。改行は列途中の空白では判定せず、原文で次の縦列が約1文字下がって始まる場合、または「のような行頭記号らしい形で始まる場合を優先して段落先頭として扱います。</div>
     <div class="help">元PDFの1ページがiPhoneの横幅に収まらない場合は、横スクロールせず複数の画面に自動分割します。右スワイプで次の画面、左スワイプで前の画面へ移動します。PDF本体と、最後に読んだPDFページ・画面番号はこの端末内に自動保存されます。</div>
   </section>
 </div>
@@ -124,7 +120,7 @@ function readSavedState(){
 
 function applySavedSettings(){
   const s=readSavedState();
-  const ids=['zoom','topCrop','bottomCrop','gap','splitSensitivity','cutProtection'];
+  const ids=['zoom','topCrop','bottomCrop','gap','splitSensitivity'];
   for(const id of ids){
     if(s[id]===undefined)continue;
     const el=$(id);
@@ -145,7 +141,6 @@ function saveState(){
       bottomCrop:+$('bottomCrop').value,
       gap:+$('gap').value,
       splitSensitivity:+$('splitSensitivity').value,
-      cutProtection:+$('cutProtection').value,
       fileName:currentFileName,
       updatedAt:Date.now()
     };
@@ -229,11 +224,10 @@ function sync(){
   $('bottomOut').value=$('bottomCrop').value+'%';
   $('gapOut').value=$('gap').value+'px';
   $('splitOut').value=$('splitSensitivity').value+'%';
-  $('cutProtectionOut').value=$('cutProtection').value+'%';
 }
 
 applySavedSettings();
-['zoom','topCrop','bottomCrop','gap','splitSensitivity','cutProtection'].forEach(id=>{
+['zoom','topCrop','bottomCrop','gap','splitSensitivity'].forEach(id=>{
   $(id).addEventListener('input',()=>{
     sync();
     saveState();
@@ -446,25 +440,21 @@ function makeSafeCutData(rowInk,contentTop,contentBottom,estimatedChar,sw){
   const local=new Float32Array(n);
   for(let i=0;i<n;i++)local[i]=rowInk[contentTop+i];
 
-  // 「文字分離防止」は段落や改行判定には使わず、切断候補の安全性だけに作用させる。
-  // 値を上げても文字の流し込み量は変えず、文字内部の細い白線を候補から外しやすくする。
-  const protection=Math.max(0,Math.min(100,+$('cutProtection').value||85))/100;
-  const smoothRadius=protection>=.75?2:1;
-  const smoothed=smoothArray(local,smoothRadius);
+  // 1文字の内部にある細い白線や、スキャンのかすれによる隙間を文字間と誤認しないようにする。
+  // 行ごとの黒画素数を少し平滑化し、ある程度まとまった高さの白帯だけを切れ目候補にする。
+  const smoothed=smoothArray(local,1);
   const positive=Array.from(smoothed).filter(v=>v>0);
   const localPeak=positive.length?percentile(positive,.86):0;
-
-  // 高い保護率ほど薄い画も「文字あり」と見なし、内部の白い筋で切りにくくする。
-  const activeThreshold=Math.max(1,Math.min(sw*.11,localPeak*(.17-.045*protection)));
+  const activeThreshold=Math.max(1,Math.min(sw*.11,localPeak*.16));
   let active=new Uint8Array(n);
   for(let i=0;i<n;i++)active[i]=smoothed[i]>=activeThreshold?1:0;
 
-  // 文字内部の小さな隙間は結合するが、隣接文字どうしまで結合しすぎない範囲に制限する。
-  const guard=Math.max(2,Math.round(estimatedChar*(.095+.085*protection)));
+  // 文字の中の空洞や濁点・半濁点との隙間はつなげて扱う。
+  const guard=Math.max(2,Math.round(estimatedChar*.16));
   const guarded=dilateRows(active,guard);
 
   const cutPoints=[0];
-  const minBlankRun=Math.max(2,Math.round(estimatedChar*(.065+.065*protection)));
+  const minBlankRun=Math.max(3,Math.round(estimatedChar*.16));
   let i=0;
   while(i<n){
     if(guarded[i]){i++;continue;}
@@ -479,10 +469,9 @@ function makeSafeCutData(rowInk,contentTop,contentBottom,estimatedChar,sw){
   cutPoints.push(n);
   cutPoints.sort((a,b)=>a-b);
 
-  // 安全な白帯が見つからない時の補助評価。
-  // 高い保護率ほど上下を広く見て、文字内部の一瞬だけ白い位置を選びにくくする。
+  // 強制切断が必要な場合は、その行だけでなく上下の広い範囲も見て安全性を評価する。
   const seamScore=new Float32Array(n);
-  const seamRadius=Math.max(2,Math.round(estimatedChar*(.15+.11*protection)));
+  const seamRadius=Math.max(2,Math.round(estimatedChar*.20));
   const prefix=new Float64Array(n+1);
   for(let y=0;y<n;y++)prefix[y+1]=prefix[y]+smoothed[y];
   for(let y=0;y<n;y++){
@@ -624,42 +613,46 @@ function chooseTake(src,offset,limit){
   const remain=src.sh-offset;
   if(remain<=limit+.5)return remain;
 
-  // ここでは段落・改行は一切作らない。
-  // 元の流し込み量を維持したまま、画面下付近の「最も安全な切断位置」だけを選ぶ。
-  const protection=Math.max(0,Math.min(100,+$('cutProtection').value||85))/100;
-  const target=Math.min(src.sh,offset+limit);
   const charH=Math.max(8,src.estimatedChar);
-  const minTake=Math.min(limit,Math.max(charH*.38,8));
+  const minTake=Math.min(limit,Math.max(charH*.52,10));
+  const target=Math.min(src.sh,offset+limit);
+  const softTarget=Math.max(offset+minTake,target-charH*.25);
   const minCp=offset+minTake;
 
-  // まず、目標位置に近い実際の白帯を優先する。
+  // 最優先は、十分な高さの白帯の中央で切ること。
   let best=-1;
-  const safeMargin=charH*(.04+.08*protection);
-  const safeTarget=Math.max(minCp,target-safeMargin);
   for(const cp of src.cutPoints){
     if(cp<=minCp)continue;
-    if(cp<=safeTarget)best=cp;
+    if(cp<=softTarget)best=cp;
     else break;
   }
-  if(best>offset && target-best<=charH*1.45)return best-offset;
+  if(best>offset)return best-offset;
 
-  // 白帯がちょうど見つからない場合も、列を早々に打ち切らない。
-  // 目標位置直前の約1.4文字分だけを調べ、上下を広く評価した最小点で切る。
+  // 目標より少し手前まで含めて、上下方向に広く見た安全度が最小の位置を探す。
   const score=src.seamScore;
   if(score&&score.length){
-    const lo=Math.max(Math.ceil(minCp),Math.floor(target-charH*1.45));
-    const hi=Math.max(lo,Math.floor(target-charH*(.10+.10*protection)));
+    const lo=Math.max(Math.ceil(minCp),Math.floor(target-charH*1.8));
+    const hi=Math.max(lo,Math.floor(target-charH*.30));
     let bestY=-1,bestScore=Infinity;
     for(let y=lo;y<=hi&&y<score.length;y++){
-      const distancePenalty=(target-y)/(charH*9);
-      const v=score[y]+distancePenalty;
+      const distancePenalty=(softTarget-y)/(charH*10);
+      const v=score[y]+Math.max(0,distancePenalty);
       if(v<bestScore){bestScore=v;bestY=y;}
     }
-    if(bestY>offset+2)return bestY-offset;
+    if(bestY>offset+3)return bestY-offset;
+
+    // それでも安全な位置が見つからなければ、もっと短めに切って文字の分断を避ける。
+    const hi2=Math.max(Math.ceil(minCp),Math.floor(target-charH*.9));
+    bestY=-1;bestScore=Infinity;
+    for(let y=Math.ceil(minCp);y<=hi2&&y<score.length;y++){
+      const v=score[y]+(hi2-y)/(charH*20);
+      if(v<bestScore){bestScore=v;bestY=y;}
+    }
+    if(bestY>offset+3)return bestY-offset;
   }
 
-  // 最終保険。以前と同じく多少手前で切るが、0を返して余分な列替えを起こさない。
-  const conservative=Math.max(minTake,limit-charH*(.72+.18*protection));
+  // 最後の保険。1文字近く余らせても、文字を上下に裂かない側を優先する。
+  const conservative=Math.max(minTake,limit-charH*1.10);
   return Math.max(3,Math.min(remain,conservative));
 }
 
