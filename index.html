@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
-<title>縦書きPDF 画像リフロー・続きから再開</title>
+<title>縦書きPDF 画像リフロー・文字切断防止</title>
 <style>
 :root{--bg:#f5f5f2;--panel:#fff;--ink:#191919;--line:#d8d8d3;--shadow:0 12px 36px rgba(0,0,0,.18)}
 *{box-sizing:border-box}
@@ -77,7 +77,7 @@ main{position:fixed;left:0;right:0;top:calc(52px + env(safe-area-inset-top));bot
       <label for="splitSensitivity">列を分ける感度</label><output id="splitOut">75%</output>
       <input id="splitSensitivity" type="range" min="40" max="100" value="75" step="5">
     </div>
-    <div class="help">白い余白そのものは文字としてリフローしません。改行は列途中の空白では判定せず、原文で次の縦列が約1文字下がって始まる場合、または「のような行頭記号らしい形で始まる場合を優先して段落先頭として扱います。</div>
+    <div class="help">白い余白そのものは文字としてリフローしません。文字の上下が分断されないよう、文字間の安全な白い谷を探してから分割します。改行は列途中の空白では判定せず、原文で次の縦列が約1文字下がって始まる場合、または「のような行頭記号らしい形で始まる場合を優先して段落先頭として扱います。</div>
     <div class="help">選択したPDFと最後に読んだページはこの端末内に自動保存されます。次回はPDFを選び直さず、続きのページから再開します。</div>
   </section>
 </div>
@@ -268,7 +268,7 @@ async function go(d){
 
 async function renderPage(){
   const token=++renderToken;
-  toast('ページを解析中…');
+  toast('文字列と安全な切れ目を解析中…');
   const p=await pdf.getPage(pageNo);
   const vp=p.getViewport({scale:2.2});
   const c=document.createElement('canvas');
@@ -397,59 +397,133 @@ function findColumns(c,y0,h){
 
 // 各縦列について、実際に文字がある上下範囲だけを抽出する。
 // 空白そのものは文字として運ばない。行頭判定に必要な上下余白量だけ数値として保持する。
+function otsuThreshold(gray){
+  const hist=new Uint32Array(256);
+  for(let i=0;i<gray.length;i++)hist[gray[i]]++;
+  const total=gray.length;
+  let sum=0;
+  for(let i=0;i<256;i++)sum+=i*hist[i];
+  let sumB=0,wB=0,maxVar=-1,threshold=180;
+  for(let t=0;t<256;t++){
+    wB+=hist[t];
+    if(!wB)continue;
+    const wF=total-wB;
+    if(!wF)break;
+    sumB+=t*hist[t];
+    const mB=sumB/wB;
+    const mF=(sum-sumB)/wF;
+    const diff=mB-mF;
+    const between=wB*wF*diff*diff;
+    if(between>maxVar){maxVar=between;threshold=t;}
+  }
+  // スキャン原稿では極端な閾値を避ける。
+  return Math.max(135,Math.min(225,threshold+8));
+}
+
+function dilateRows(mask,radius){
+  const n=mask.length,out=new Uint8Array(n),sum=new Uint32Array(n+1);
+  for(let i=0;i<n;i++)sum[i+1]=sum[i]+(mask[i]?1:0);
+  for(let i=0;i<n;i++){
+    const a=Math.max(0,i-radius),b=Math.min(n,i+radius+1);
+    out[i]=(sum[b]-sum[a])>0?1:0;
+  }
+  return out;
+}
+
+function makeSafeCutData(rowInk,contentTop,contentBottom,estimatedChar,sw){
+  const n=contentBottom-contentTop;
+  const local=new Float32Array(n);
+  for(let i=0;i<n;i++)local[i]=rowInk[contentTop+i];
+
+  // 文字内部の細い白線を文字間と誤認しないよう、黒画素行を上下に少し膨張させる。
+  const activeThreshold=Math.max(1,sw*.018);
+  let active=new Uint8Array(n);
+  for(let i=0;i<n;i++)active[i]=local[i]>=activeThreshold?1:0;
+  const guard=Math.max(1,Math.round(estimatedChar*.075));
+  const guarded=dilateRows(active,guard);
+
+  const cutPoints=[0];
+  let i=0;
+  while(i<n){
+    if(guarded[i]){i++;continue;}
+    const a=i;
+    while(i<n&&!guarded[i])i++;
+    const b=i;
+    if(b-a>=1){
+      const cp=Math.round((a+b)/2);
+      if(cp>2&&cp<n-2)cutPoints.push(cp);
+    }
+  }
+  cutPoints.push(n);
+  cutPoints.sort((a,b)=>a-b);
+
+  // 強制切断が必要になった場合のため、分割線周辺の黒画素量を評価する。
+  // 1行だけ白くても、その直上直下に文字があれば高得点になり、切断位置に選ばれにくい。
+  const seamScore=new Float32Array(n);
+  const seamRadius=Math.max(1,Math.round(estimatedChar*.055));
+  const prefix=new Float64Array(n+1);
+  for(let y=0;y<n;y++)prefix[y+1]=prefix[y]+local[y];
+  for(let y=0;y<n;y++){
+    const a=Math.max(0,y-seamRadius),b=Math.min(n,y+seamRadius+1);
+    seamScore[y]=(prefix[b]-prefix[a])/(b-a);
+  }
+  return {cutPoints,seamScore};
+}
+
+// 各縦列について、実際に文字がある上下範囲だけを抽出する。
+// 文字の上下を別々に判定せず、薄い線や濁点を含めて一つの文字列画像として扱う。
 function analyzeSourceColumn(c,x0,x1,y0,y1){
   const ctx=c.getContext('2d',{willReadFrequently:true});
   const colW=x1-x0;
-  const padX=Math.max(2,Math.round(colW*.10));
+  const padX=Math.max(3,Math.round(colW*.14));
   const sx=Math.max(0,x0-padX);
   const sw=Math.min(c.width-sx,colW+padX*2);
   const h=y1-y0;
   const im=ctx.getImageData(sx,y0,sw,h),d=im.data;
+  const gray=new Uint8Array(sw*h);
+  for(let p=0,j=0;p<d.length;p+=4,j++)gray[j]=Math.round((d[p]*299+d[p+1]*587+d[p+2]*114)/1000);
+  const inkThreshold=otsuThreshold(gray);
   const rowInk=new Float32Array(h);
 
   for(let y=0;y<h;y++){
     let n=0;
-    for(let x=0;x<sw;x++){
-      const i=(y*sw+x)*4;
-      const lum=(d[i]*299+d[i+1]*587+d[i+2]*114)/1000;
-      if(lum<210)n++;
-    }
+    const off=y*sw;
+    for(let x=0;x<sw;x++)if(gray[off+x]<=inkThreshold)n++;
     rowInk[y]=n;
   }
 
+  const estimatedChar=Math.max(8,colW*1.05);
   const smooth=smoothArray(rowInk,1);
   const positive=Array.from(smooth).filter(v=>v>0);
   if(!positive.length)return null;
   const peak=percentile(positive,.90);
-  const threshold=Math.max(1,peak*.05);
-  let mask=new Uint8Array(h);
-  for(let y=0;y<h;y++)mask[y]=smooth[y]>=threshold?1:0;
+  const threshold=Math.max(.5,Math.min(sw*.06,peak*.025));
+  let contentMask=new Uint8Array(h);
+  for(let y=0;y<h;y++)contentMask[y]=smooth[y]>=threshold?1:0;
 
-  const estimatedChar=Math.max(8,colW*1.05);
-  // 通常の文字間だけを埋める。長い白帯を文章とはみなさない。
-  mask=closeSmallHoles(mask,Math.max(2,Math.round(estimatedChar*.62)));
+  // 文字の一部が離れていても本文範囲から落ちないよう、上下方向に統合する。
+  contentMask=closeSmallHoles(contentMask,Math.max(2,Math.round(estimatedChar*.34)));
 
   let first=-1,last=-1;
-  for(let y=0;y<h;y++){if(mask[y]){first=y;break;}}
-  for(let y=h-1;y>=0;y--){if(mask[y]){last=y;break;}}
+  for(let y=0;y<h;y++){if(contentMask[y]){first=y;break;}}
+  for(let y=h-1;y>=0;y--){if(contentMask[y]){last=y;break;}}
   if(first<0||last<first)return null;
 
-  const padY=Math.max(1,Math.round(estimatedChar*.10));
+  // 上下の細い画や濁点を切り落とさないよう従来より余白を多めに確保する。
+  const padY=Math.max(2,Math.round(estimatedChar*.22));
   const contentTop=Math.max(0,first-padY);
   const contentBottom=Math.min(h,last+1+padY);
   const trailingBlank=Math.max(0,h-(last+1));
   const leadingBlank=Math.max(0,first);
 
   // 行頭の「を画像だけで補助判定する。
-  // OCRは使わず、先頭1文字が通常文字より小さく、上側にまとまる角括弧状の字形を候補にする。
   const glyphH=Math.max(4,Math.min(h-first,Math.round(estimatedChar*1.05)));
   let gx0=sw,gy0=glyphH,gx1=-1,gy1=-1,inkCount=0;
   for(let yy=0;yy<glyphH;yy++){
     const y=first+yy;
+    const off=y*sw;
     for(let x=0;x<sw;x++){
-      const i=(y*sw+x)*4;
-      const lum=(d[i]*299+d[i+1]*587+d[i+2]*114)/1000;
-      if(lum<190){
+      if(gray[off+x]<=Math.max(120,inkThreshold-18)){
         inkCount++;
         if(x<gx0)gx0=x;
         if(x>gx1)gx1=x;
@@ -467,21 +541,7 @@ function analyzeSourceColumn(c,x0,x1,y0,y1){
     glyphBoxW<sw*.78 &&
     glyphDensity<.16;
 
-  // 文字を途中で切らないため、文字間の白帯を分割候補として記録する。
-  const cutPoints=[0];
-  let y=contentTop;
-  while(y<contentBottom){
-    if(mask[y]){y++;continue;}
-    const bs=y;
-    while(y<contentBottom&&!mask[y])y++;
-    const len=y-bs;
-    if(len>=Math.max(2,estimatedChar*.08)){
-      const center=Math.round((bs+y)/2)-contentTop;
-      if(center>2&&center<(contentBottom-contentTop)-2)cutPoints.push(center);
-    }
-  }
-  cutPoints.push(contentBottom-contentTop);
-  cutPoints.sort((a,b)=>a-b);
+  const safe=makeSafeCutData(rowInk,contentTop,contentBottom,estimatedChar,sw);
 
   return {
     sx,sw,
@@ -493,7 +553,8 @@ function analyzeSourceColumn(c,x0,x1,y0,y1){
     firstGlyphQuoteLike,
     paragraphBreakBefore:false,
     indentStart:false,
-    cutPoints
+    cutPoints:safe.cutPoints,
+    seamScore:safe.seamScore
   };
 }
 
@@ -540,16 +601,49 @@ function buildSourceColumns(c,cols,y0,y1){
 function chooseTake(src,offset,limit){
   const remain=src.sh-offset;
   if(remain<=limit+.5)return remain;
-  const target=offset+limit;
-  const minTake=Math.min(limit,Math.max(src.estimatedChar*.45,10));
+
+  const target=Math.min(src.sh,offset+limit);
+  const charH=Math.max(8,src.estimatedChar);
+  const minTake=Math.min(limit,Math.max(charH*.38,8));
+  const minCp=offset+minTake;
+
+  // 最優先は、文字の上下に十分な白さがある安全な切れ目。
   let best=-1;
   for(const cp of src.cutPoints){
-    if(cp<=offset+minTake)continue;
+    if(cp<=minCp)continue;
     if(cp<=target)best=cp;
     else break;
   }
   if(best>offset)return best-offset;
-  return limit;
+
+  // 安全な白帯が見つからない場合も指定高さでそのまま切らない。
+  // 目標位置の手前約1.3文字分から、前後を含めて黒画素量が最小の位置を探す。
+  const score=src.seamScore;
+  if(score&&score.length){
+    const lo=Math.max(Math.ceil(minCp),Math.floor(target-charH*1.35));
+    const hi=Math.max(lo,Math.floor(target-charH*.08));
+    let bestY=-1,bestScore=Infinity;
+    for(let y=lo;y<=hi&&y<score.length;y++){
+      const distancePenalty=(target-y)/(charH*8);
+      const v=score[y]+distancePenalty;
+      if(v<bestScore){bestScore=v;bestY=y;}
+    }
+    if(bestY>offset+2)return bestY-offset;
+
+    // さらに広い範囲で最も安全な場所を探す。
+    const lo2=Math.ceil(minCp),hi2=Math.min(score.length-1,Math.floor(target-2));
+    bestY=-1;bestScore=Infinity;
+    for(let y=lo2;y<=hi2;y++){
+      const v=score[y]+(target-y)/(charH*18);
+      if(v<bestScore){bestScore=v;bestY=y;}
+    }
+    if(bestY>offset+2)return bestY-offset;
+  }
+
+  // ここまで候補がない場合は文字中央を切るより、1文字分手前で短く終える。
+  // 出力列の下に少し余白ができても、文字を上下に分断しないことを優先する。
+  const conservative=Math.max(minTake,limit-charH*.75);
+  return Math.max(3,Math.min(remain,conservative));
 }
 
 // 原稿列を読み順に流す。
