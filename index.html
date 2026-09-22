@@ -80,7 +80,11 @@ main{position:fixed;left:0;right:0;top:0;bottom:calc(54px + env(safe-area-inset-
       <label for="splitSensitivity">列を分ける感度</label><output id="splitOut">75%</output>
       <input id="splitSensitivity" type="range" min="40" max="100" value="75" step="5">
     </div>
-    <div class="help">白い余白そのものは文字としてリフローしません。文字の上下が分断されないよう、文字間の安全な白い谷を探してから分割します。改行は列途中の空白では判定せず、原文で次の縦列が約1文字下がって始まる場合、または「のような行頭記号らしい形で始まる場合を優先して段落先頭として扱います。</div>
+    <div class="setting">
+      <label for="cutProtection">文字分離防止</label><output id="cutProtectionOut">85%</output>
+      <input id="cutProtection" type="range" min="0" max="100" value="85" step="5">
+    </div>
+    <div class="help">白い余白そのものは文字としてリフローしません。文字の上下が分断されないよう、文字間の安全な白い谷を探してから分割します。「文字分離防止」を上げるほど文字内部の白い隙間では切れにくくなります。画面下に1文字が丸ごと入らない場合は、その文字を次の列へ送ります。改行は列途中の空白では判定せず、原文で次の縦列が約1文字下がって始まる場合、または「のような行頭記号らしい形で始まる場合を優先して段落先頭として扱います。</div>
     <div class="help">元PDFの1ページがiPhoneの横幅に収まらない場合は、横スクロールせず複数の画面に自動分割します。右スワイプで次の画面、左スワイプで前の画面へ移動します。PDF本体と、最後に読んだPDFページ・画面番号はこの端末内に自動保存されます。</div>
   </section>
 </div>
@@ -120,7 +124,7 @@ function readSavedState(){
 
 function applySavedSettings(){
   const s=readSavedState();
-  const ids=['zoom','topCrop','bottomCrop','gap','splitSensitivity'];
+  const ids=['zoom','topCrop','bottomCrop','gap','splitSensitivity','cutProtection'];
   for(const id of ids){
     if(s[id]===undefined)continue;
     const el=$(id);
@@ -141,6 +145,7 @@ function saveState(){
       bottomCrop:+$('bottomCrop').value,
       gap:+$('gap').value,
       splitSensitivity:+$('splitSensitivity').value,
+      cutProtection:+$('cutProtection').value,
       fileName:currentFileName,
       updatedAt:Date.now()
     };
@@ -224,10 +229,11 @@ function sync(){
   $('bottomOut').value=$('bottomCrop').value+'%';
   $('gapOut').value=$('gap').value+'px';
   $('splitOut').value=$('splitSensitivity').value+'%';
+  $('cutProtectionOut').value=$('cutProtection').value+'%';
 }
 
 applySavedSettings();
-['zoom','topCrop','bottomCrop','gap','splitSensitivity'].forEach(id=>{
+['zoom','topCrop','bottomCrop','gap','splitSensitivity','cutProtection'].forEach(id=>{
   $(id).addEventListener('input',()=>{
     sync();
     saveState();
@@ -440,21 +446,21 @@ function makeSafeCutData(rowInk,contentTop,contentBottom,estimatedChar,sw){
   const local=new Float32Array(n);
   for(let i=0;i<n;i++)local[i]=rowInk[contentTop+i];
 
-  // 1文字の内部にある細い白線や、スキャンのかすれによる隙間を文字間と誤認しないようにする。
-  // 行ごとの黒画素数を少し平滑化し、ある程度まとまった高さの白帯だけを切れ目候補にする。
-  const smoothed=smoothArray(local,1);
+  // 文字分離防止が高いほど、文字内部の白い隙間を切れ目として採用しにくくする。
+  const protection=Math.max(0,Math.min(100,+$('cutProtection').value||85))/100;
+  const smoothed=smoothArray(local,Math.max(1,Math.round(1+protection)));
   const positive=Array.from(smoothed).filter(v=>v>0);
   const localPeak=positive.length?percentile(positive,.86):0;
-  const activeThreshold=Math.max(1,Math.min(sw*.11,localPeak*.16));
+  const activeThreshold=Math.max(1,Math.min(sw*.11,localPeak*(.18-.07*protection)));
   let active=new Uint8Array(n);
   for(let i=0;i<n;i++)active[i]=smoothed[i]>=activeThreshold?1:0;
 
-  // 文字の中の空洞や濁点・半濁点との隙間はつなげて扱う。
-  const guard=Math.max(2,Math.round(estimatedChar*.16));
+  // 上下に離れた画、濁点、半濁点、スキャンのかすれを同じ文字として保護する。
+  const guard=Math.max(2,Math.round(estimatedChar*(.11+.12*protection)));
   const guarded=dilateRows(active,guard);
 
   const cutPoints=[0];
-  const minBlankRun=Math.max(3,Math.round(estimatedChar*.16));
+  const minBlankRun=Math.max(2,Math.round(estimatedChar*(.08+.12*protection)));
   let i=0;
   while(i<n){
     if(guarded[i]){i++;continue;}
@@ -469,9 +475,9 @@ function makeSafeCutData(rowInk,contentTop,contentBottom,estimatedChar,sw){
   cutPoints.push(n);
   cutPoints.sort((a,b)=>a-b);
 
-  // 強制切断が必要な場合は、その行だけでなく上下の広い範囲も見て安全性を評価する。
+  // 補助評価値。通常はcutPointsだけを使い、文字途中での強制切断には使わない。
   const seamScore=new Float32Array(n);
-  const seamRadius=Math.max(2,Math.round(estimatedChar*.20));
+  const seamRadius=Math.max(2,Math.round(estimatedChar*(.12+.12*protection)));
   const prefix=new Float64Array(n+1);
   for(let y=0;y<n;y++)prefix[y+1]=prefix[y]+smoothed[y];
   for(let y=0;y<n;y++){
@@ -613,47 +619,25 @@ function chooseTake(src,offset,limit){
   const remain=src.sh-offset;
   if(remain<=limit+.5)return remain;
 
+  // 文字途中で切る処理は行わない。
+  // 現在位置より後ろにある「安全な文字間」のうち、残り高さに収まる最後の位置だけを使う。
+  const protection=Math.max(0,Math.min(100,+$('cutProtection').value||85))/100;
   const charH=Math.max(8,src.estimatedChar);
-  const minTake=Math.min(limit,Math.max(charH*.52,10));
-  const target=Math.min(src.sh,offset+limit);
-  const softTarget=Math.max(offset+minTake,target-charH*.25);
-  const minCp=offset+minTake;
-
-  // 最優先は、十分な高さの白帯の中央で切ること。
+  const minWhole=Math.max(3,charH*(.28+.22*protection));
+  const target=offset+limit;
   let best=-1;
+
   for(const cp of src.cutPoints){
-    if(cp<=minCp)continue;
-    if(cp<=softTarget)best=cp;
+    if(cp<=offset+minWhole)continue;
+    if(cp<=target+.001)best=cp;
     else break;
   }
+
   if(best>offset)return best-offset;
 
-  // 目標より少し手前まで含めて、上下方向に広く見た安全度が最小の位置を探す。
-  const score=src.seamScore;
-  if(score&&score.length){
-    const lo=Math.max(Math.ceil(minCp),Math.floor(target-charH*1.8));
-    const hi=Math.max(lo,Math.floor(target-charH*.30));
-    let bestY=-1,bestScore=Infinity;
-    for(let y=lo;y<=hi&&y<score.length;y++){
-      const distancePenalty=(softTarget-y)/(charH*10);
-      const v=score[y]+Math.max(0,distancePenalty);
-      if(v<bestScore){bestScore=v;bestY=y;}
-    }
-    if(bestY>offset+3)return bestY-offset;
-
-    // それでも安全な位置が見つからなければ、もっと短めに切って文字の分断を避ける。
-    const hi2=Math.max(Math.ceil(minCp),Math.floor(target-charH*.9));
-    bestY=-1;bestScore=Infinity;
-    for(let y=Math.ceil(minCp);y<=hi2&&y<score.length;y++){
-      const v=score[y]+(hi2-y)/(charH*20);
-      if(v<bestScore){bestScore=v;bestY=y;}
-    }
-    if(bestY>offset+3)return bestY-offset;
-  }
-
-  // 最後の保険。1文字近く余らせても、文字を上下に裂かない側を優先する。
-  const conservative=Math.max(minTake,limit-charH*1.10);
-  return Math.max(3,Math.min(remain,conservative));
+  // 画面下に文字1個分の安全な区切りが入らない場合は0を返し、
+  // その文字全体を次の出力列へ送る。これが上下分離を防ぐ本体の処理。
+  return 0;
 }
 
 // 原稿列を読み順に流す。
@@ -710,7 +694,24 @@ function buildFlowColumns(c,sourceCols,zoom,usableH,gap){
           offset+=take;
           if(offset>=src.sh-.5){colIndex++;offset=0;}
         }else{
-          colIndex++;offset=0;continue;
+          // 通常ここには来ない。安全な切れ目が1つも検出できない場合だけ、
+          // 最初の安全な区切りまでを丸ごと表示して内容を捨てない。
+          const nextSafe=src.cutPoints.find(cp=>cp>offset+2);
+          if(nextSafe!==undefined){
+            const forcedTake=Math.min(src.sh-offset,nextSafe-offset);
+            chunks.push({src,sourceY:src.sy+offset,sourceH:forcedTake,destY:0});
+            maxW=Math.max(maxW,src.sw);
+            used=forcedTake;
+            offset+=forcedTake;
+            if(offset>=src.sh-.5){colIndex++;offset=0;}
+          }else{
+            // 最終保険。内容を失わないため残りをそのまま1列として出す。
+            const forcedTake=src.sh-offset;
+            chunks.push({src,sourceY:src.sy+offset,sourceH:forcedTake,destY:0});
+            maxW=Math.max(maxW,src.sw);
+            used=forcedTake;
+            colIndex++;offset=0;
+          }
         }
       }else break;
     }
