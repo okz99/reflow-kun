@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
-<title>縦書きPDF 画像リフロー・文字切断防止</title>
+<title>縦書きPDF 画像リフロー・画面ページ分割</title>
 <style>
 :root{--bg:#f5f5f2;--panel:#fff;--ink:#191919;--line:#d8d8d3;--shadow:0 12px 36px rgba(0,0,0,.18)}
 *{box-sizing:border-box}
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif}
 button,input{font:inherit}
-main{position:fixed;left:0;right:0;top:0;bottom:calc(54px + env(safe-area-inset-bottom));overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;touch-action:pan-x;background:var(--bg)}
-#reader{height:100%;display:flex;flex-direction:row-reverse;align-items:flex-start;gap:10px;padding:calc(8px + env(safe-area-inset-top)) 12px 8px;width:max-content;min-width:100%}
+main{position:fixed;left:0;right:0;top:0;bottom:calc(54px + env(safe-area-inset-bottom));overflow:hidden;touch-action:pan-y;background:var(--bg)}
+#reader{height:100%;width:100%;display:flex;flex-direction:row-reverse;align-items:flex-start;justify-content:flex-start;gap:10px;padding:calc(8px + env(safe-area-inset-top)) 12px 8px;overflow:hidden}
 .col{display:block;flex:none;background:#fff}
 .placeholder{width:100vw;padding:88px 28px 40px;text-align:center;color:#777;line-height:1.8;font-size:14px}
 #bottomBar{position:fixed;z-index:50;left:0;right:0;bottom:0;height:calc(54px + env(safe-area-inset-bottom));display:flex;align-items:flex-start;justify-content:space-between;padding:7px calc(10px + env(safe-area-inset-right)) env(safe-area-inset-bottom) calc(12px + env(safe-area-inset-left));background:rgba(245,245,242,.96);backdrop-filter:blur(12px);border-top:1px solid rgba(0,0,0,.10)}
@@ -81,7 +81,7 @@ main{position:fixed;left:0;right:0;top:0;bottom:calc(54px + env(safe-area-inset-
       <input id="splitSensitivity" type="range" min="40" max="100" value="75" step="5">
     </div>
     <div class="help">白い余白そのものは文字としてリフローしません。文字の上下が分断されないよう、文字間の安全な白い谷を探してから分割します。改行は列途中の空白では判定せず、原文で次の縦列が約1文字下がって始まる場合、または「のような行頭記号らしい形で始まる場合を優先して段落先頭として扱います。</div>
-    <div class="help">選択したPDFと最後に読んだページはこの端末内に自動保存されます。次回はPDFを選び直さず、続きのページから再開します。</div>
+    <div class="help">元PDFの1ページがiPhoneの横幅に収まらない場合は、横スクロールせず複数の画面に自動分割します。右スワイプで次の画面、左スワイプで前の画面へ移動します。PDF本体と、最後に読んだPDFページ・画面番号はこの端末内に自動保存されます。</div>
   </section>
 </div>
 
@@ -98,6 +98,8 @@ const status=$('status');
 const overlay=$('settingsOverlay');
 let pdf=null,pageNo=1,sourceCanvas=null,timer=null,renderToken=0;
 let touchStart=null;
+let virtualPages=[];
+let virtualPageIndex=0;
 
 // PDF本体はIndexedDB、ページ番号と設定はlocalStorageへ保存する。
 const DB_NAME='verticalPdfReflowDB';
@@ -133,6 +135,7 @@ function saveState(){
   try{
     const s={
       pageNo,
+      virtualPageIndex,
       zoom:+$('zoom').value,
       topCrop:+$('topCrop').value,
       bottomCrop:+$('bottomCrop').value,
@@ -243,12 +246,13 @@ file.addEventListener('change',async()=>{
     const loadedPdf=await pdfjsLib.getDocument({data}).promise;
     pdf=loadedPdf;
     pageNo=1;
+    virtualPageIndex=0;
     currentFileName=selected.name||'保存したPDF';
     $('fileLabel').textContent=currentFileName;
     await savePdfToDevice(selected,currentFileName);
     saveState();
     await requestPersistentStorage();
-    await renderPage();
+    await renderPage(0);
     closeSettings();
     toast('PDFと読書位置を保存しました');
   }catch(e){
@@ -257,19 +261,21 @@ file.addEventListener('change',async()=>{
   }
 });
 
-$('prev').onclick=()=>go(-1);
-$('next').onclick=()=>go(1);
+$('prev').onclick=()=>goPdfPage(-1);
+$('next').onclick=()=>goPdfPage(1);
 
-async function go(d){
+// 設定画面の「前/次」は元PDFのページ単位で移動する。
+async function goPdfPage(d){
   if(!pdf)return;
   const n=Math.max(1,Math.min(pdf.numPages,pageNo+d));
   if(n===pageNo)return;
   pageNo=n;
-  saveState();
-  await renderPage();
+  // 前のPDFページへ戻る場合は、そのページの最後の仮想画面を表示する。
+  const target=d<0?Number.POSITIVE_INFINITY:0;
+  await renderPage(target);
 }
 
-async function renderPage(){
+async function renderPage(targetVirtualIndex=0){
   const token=++renderToken;
   toast('文字列と安全な切れ目を解析中…');
   const p=await pdf.getPage(pageNo);
@@ -280,11 +286,7 @@ async function renderPage(){
   await p.render({canvasContext:c.getContext('2d',{alpha:false}),viewport:vp}).promise;
   if(token!==renderToken)return;
   sourceCanvas=c;
-  const info=pageNo+' / '+pdf.numPages;
-  $('pageInfo').textContent=info;
-  $('pageBadge').textContent=info;
-  saveState();
-  reflow();
+  reflow(targetVirtualIndex);
 }
 
 function percentile(values,q){
@@ -655,14 +657,13 @@ function chooseTake(src,offset,limit){
 }
 
 // 原稿列を読み順に流す。
-// 原稿の通常の列境界は連続して詰めるが、段落先頭だけは新しい出力列から始める。
-function renderFlow(c,sourceCols,zoom,usableH,gap){
-  reader.innerHTML='';
-  reader.style.gap=gap+'px';
+// ここでは画面分割を一切考えず、まず元PDFページ全体のリフロー結果を完成させる。
+// 段落判定はこの段階で確定するため、後段のiPhone画面分割によって改行位置は変化しない。
+function buildFlowColumns(c,sourceCols,zoom,usableH,gap){
   const targetSrcH=Math.max(40,usableH/zoom);
   let colIndex=0;
   let offset=0;
-  let outCount=0;
+  const outputColumns=[];
 
   while(colIndex<sourceCols.length){
     let need=targetSrcH;
@@ -699,7 +700,6 @@ function renderFlow(c,sourceCols,zoom,usableH,gap){
     }
 
     if(!chunks.length){
-      // 字下げだけで高さを使い切るような異常値を避ける。
       if(colIndex<sourceCols.length){
         const src=sourceCols[colIndex];
         const take=chooseTake(src,offset,targetSrcH);
@@ -734,13 +734,66 @@ function renderFlow(c,sourceCols,zoom,usableH,gap){
       const dy=Math.round(ch.destY*zoom);
       oc.drawImage(c,ch.src.sx,ch.sourceY,ch.src.sw,ch.sourceH,dx,dy,dw,dh);
     }
-    reader.appendChild(out);
-    outCount++;
+    outputColumns.push(out);
   }
-  return outCount;
+  return outputColumns;
 }
 
-function reflow(){
+// 完成済みのリフロー列を、iPhoneの表示可能横幅ごとに分ける。
+// ここでは文字や段落の解析をしない。単に完成済みの列を画面単位へグループ化するだけにする。
+function paginateFlowColumns(columns,gap){
+  if(!columns.length)return [];
+  const cs=getComputedStyle(reader);
+  const padLeft=parseFloat(cs.paddingLeft)||0;
+  const padRight=parseFloat(cs.paddingRight)||0;
+  const availableWidth=Math.max(40,main.clientWidth-padLeft-padRight);
+  const pages=[];
+  let page=[];
+  let used=0;
+
+  for(const col of columns){
+    const w=col.width;
+    const addition=(page.length?gap:0)+w;
+    if(page.length&&used+addition>availableWidth+.5){
+      pages.push(page);
+      page=[];
+      used=0;
+    }
+    if(page.length)used+=gap;
+    page.push(col);
+    used+=w;
+  }
+  if(page.length)pages.push(page);
+  return pages;
+}
+
+function updatePageIndicators(){
+  if(!pdf){
+    $('pageInfo').textContent='— / —';
+    $('pageBadge').textContent='— / —';
+    return;
+  }
+  const subTotal=Math.max(1,virtualPages.length);
+  const sub=Math.min(subTotal,virtualPageIndex+1);
+  const base=pageNo+' / '+pdf.numPages;
+  const info=subTotal>1?base+'　画面 '+sub+' / '+subTotal:base;
+  const badge=subTotal>1?pageNo+'/'+pdf.numPages+' · '+sub+'/'+subTotal:pageNo+' / '+pdf.numPages;
+  $('pageInfo').textContent=info;
+  $('pageBadge').textContent=badge;
+}
+
+function showVirtualPage(index,save=true){
+  if(!virtualPages.length)return;
+  const max=virtualPages.length-1;
+  if(!Number.isFinite(index))index=max;
+  virtualPageIndex=Math.max(0,Math.min(max,Math.round(index)));
+  reader.innerHTML='';
+  for(const col of virtualPages[virtualPageIndex])reader.appendChild(col);
+  updatePageIndicators();
+  if(save)saveState();
+}
+
+function reflow(targetVirtualIndex=virtualPageIndex){
   if(!sourceCanvas)return;
   const c=sourceCanvas;
   const top=+$('topCrop').value/100;
@@ -753,34 +806,60 @@ function reflow(){
   const gap=+$('gap').value;
   const usableH=Math.max(180,main.clientHeight-16);
 
+  reader.style.gap=gap+'px';
+
   if(!cols.length){
+    virtualPages=[];
     reader.innerHTML='<div class="placeholder">本文の列を認識できませんでした。<br>⚙から上下の除外率または列を分ける感度を変更してください。</div>';
+    updatePageIndicators();
     return;
   }
 
   const sourceCols=buildSourceColumns(c,cols,y0,y1);
-  const count=renderFlow(c,sourceCols,zoom,usableH,gap);
-  if(!count){
+  const flowColumns=buildFlowColumns(c,sourceCols,zoom,usableH,gap);
+  if(!flowColumns.length){
+    virtualPages=[];
     reader.innerHTML='<div class="placeholder">本文を再配置できませんでした。</div>';
+    updatePageIndicators();
     return;
   }
 
-  // 縦書きなのでページの右端から読み始める。
-  requestAnimationFrame(()=>{main.scrollLeft=Math.max(0,main.scrollWidth-main.clientWidth);});
+  virtualPages=paginateFlowColumns(flowColumns,gap);
+  showVirtualPage(targetVirtualIndex,true);
 }
 
-// 右スワイプで次ページ、左スワイプで前ページ。
-// 本文内の横スクロールと競合しないよう、ページ端にいるときだけページ移動する。
+// 右スワイプは「次の読書画面」、左スワイプは「前の読書画面」へ移動する。
+// 同じPDFページ内に次の仮想画面がある間はPDFページを変更しない。
+async function moveReadingScreen(d){
+  if(!pdf||!virtualPages.length)return;
+
+  if(d>0){
+    if(virtualPageIndex<virtualPages.length-1){
+      showVirtualPage(virtualPageIndex+1,true);
+      return;
+    }
+    if(pageNo<pdf.numPages){
+      pageNo++;
+      await renderPage(0);
+    }
+    return;
+  }
+
+  if(virtualPageIndex>0){
+    showVirtualPage(virtualPageIndex-1,true);
+    return;
+  }
+  if(pageNo>1){
+    pageNo--;
+    await renderPage(Number.POSITIVE_INFINITY);
+  }
+}
+
+// 横スクロールは行わず、スワイプを読書画面の切り替え専用にする。
 main.addEventListener('touchstart',e=>{
   if(e.touches.length!==1)return;
   const t=e.touches[0];
-  touchStart={
-    x:t.clientX,
-    y:t.clientY,
-    time:Date.now(),
-    scrollLeft:main.scrollLeft,
-    maxScroll:Math.max(0,main.scrollWidth-main.clientWidth)
-  };
+  touchStart={x:t.clientX,y:t.clientY,time:Date.now()};
 },{passive:true});
 
 main.addEventListener('touchend',e=>{
@@ -789,17 +868,12 @@ main.addEventListener('touchend',e=>{
   const dx=t.clientX-touchStart.x;
   const dy=t.clientY-touchStart.y;
   const dt=Date.now()-touchStart.time;
-  const startScroll=touchStart.scrollLeft;
-  const maxScroll=touchStart.maxScroll;
   touchStart=null;
-  if(dt>900||Math.abs(dx)<65||Math.abs(dx)<Math.abs(dy)*1.25)return;
+  if(dt>900||Math.abs(dx)<55||Math.abs(dx)<Math.abs(dy)*1.20)return;
 
-  const noOverflow=maxScroll<=6;
-  if(dx>0&&(noOverflow||startScroll<=10)){
-    go(1);
-  }else if(dx<0&&(noOverflow||startScroll>=maxScroll-10)){
-    go(-1);
-  }
+  // ユーザー指定どおり、右スワイプで次、左スワイプで前。
+  if(dx>0)moveReadingScreen(1);
+  else moveReadingScreen(-1);
 });
 
 window.addEventListener('resize',()=>{
@@ -824,7 +898,8 @@ async function restoreLastBook(){
     const state=readSavedState();
     const restoredPage=Number(state.pageNo)||1;
     pageNo=Math.max(1,Math.min(pdf.numPages,Math.round(restoredPage)));
-    await renderPage();
+    const restoredVirtual=Number(state.virtualPageIndex);
+    await renderPage(Number.isFinite(restoredVirtual)?restoredVirtual:0);
     toast('前回の続きから再開しました');
   }catch(e){
     console.error(e);
