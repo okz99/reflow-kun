@@ -106,7 +106,7 @@ const DB_NAME='verticalPdfReflowDB';
 const DB_VERSION=1;
 const STORE_NAME='books';
 const BOOK_KEY='currentBook';
-const STATE_KEY='verticalPdfReflowStateV3';
+const STATE_KEY='verticalPdfReflowStateV10';
 let currentFileName='';
 
 function readSavedState(){
@@ -440,53 +440,78 @@ function makeSafeCutData(rowInk,contentTop,contentBottom,estimatedChar,sw){
   const local=new Float32Array(n);
   for(let i=0;i<n;i++)local[i]=rowInk[contentTop+i];
 
-  // 文字内部の細い白線、濁点・半濁点との隙間、スキャンのかすれを
-  // 「文字間」と誤認しないよう、文字高さに応じて上下方向へ保護領域を広げる。
   const smoothed=smoothArray(local,1);
-  const positive=Array.from(smoothed).filter(v=>v>0);
-  const localPeak=positive.length?percentile(positive,.86):0;
-  const activeThreshold=Math.max(.75,Math.min(sw*.10,localPeak*.13));
-  let active=new Uint8Array(n);
-  for(let i=0;i<n;i++)active[i]=smoothed[i]>=activeThreshold?1:0;
 
-  // 従来より保護幅を広げる。
-  // これにより、文字の横画と横画の間などを誤って分割位置にしにくくする。
-  const guard=Math.max(3,Math.round(estimatedChar*.22));
-  const guarded=dilateRows(active,guard);
-
-  const cutPoints=[0];
-  const safeBands=[];
-  const minBlankRun=Math.max(3,Math.round(estimatedChar*.12));
-  let i=0;
-  while(i<n){
-    if(guarded[i]){i++;continue;}
-    const a=i;
-    while(i<n&&!guarded[i])i++;
-    const b=i;
-    if(b-a>=minBlankRun){
-      // 白帯の中央を切断位置にする。
-      // 上下どちらかの文字に近すぎる位置では切らない。
-      const cp=Math.round((a+b)/2);
-      if(cp>2&&cp<n-2){
-        cutPoints.push(cp);
-        safeBands.push([a,b]);
-      }
-    }
-  }
-  cutPoints.push(n);
-  cutPoints.sort((a,b)=>a-b);
-
-  // 行ごとの安全度。
-  // これは補助評価専用で、実際の切断位置は必ず cutPoints の安全な白帯から選ぶ。
-  const seamScore=new Float32Array(n);
-  const seamRadius=Math.max(2,Math.round(estimatedChar*.24));
+  // 各位置の「切りやすさ」を、周辺の黒画素量で評価する。
+  // 値が小さいほど文字と文字の間である可能性が高い。
+  const seamRadius=Math.max(2,Math.round(estimatedChar*.18));
   const prefix=new Float64Array(n+1);
   for(let y=0;y<n;y++)prefix[y+1]=prefix[y]+smoothed[y];
+
+  const seamScore=new Float32Array(n);
   for(let y=0;y<n;y++){
-    const a=Math.max(0,y-seamRadius),b=Math.min(n,y+seamRadius+1);
+    const a=Math.max(0,y-seamRadius);
+    const b=Math.min(n,y+seamRadius+1);
     seamScore[y]=(prefix[b]-prefix[a])/(b-a);
   }
-  return {cutPoints,safeBands,seamScore};
+
+  // 文字列の先頭から、ほぼ1文字ピッチごとに境界を作る。
+  // ただし機械的に切らず、予想位置の前後で最も黒画素が少ない場所へ補正する。
+  const charH=Math.max(8,estimatedChar);
+  const cutPoints=[0];
+
+  let expected=charH;
+  let last=0;
+
+  while(expected<n-charH*.35){
+    const lo=Math.max(
+      last+Math.round(charH*.45),
+      Math.floor(expected-charH*.30)
+    );
+    const hi=Math.min(
+      n-2,
+      Math.ceil(expected+charH*.30)
+    );
+
+    if(hi<=lo){
+      expected+=charH;
+      continue;
+    }
+
+    let bestY=-1;
+    let bestValue=Infinity;
+
+    for(let y=lo;y<=hi;y++){
+      // 予想された文字境界から離れすぎる位置には軽いペナルティを付ける。
+      const distance=Math.abs(y-expected)/charH;
+      const value=seamScore[y]+distance*.10;
+
+      if(value<bestValue){
+        bestValue=value;
+        bestY=y;
+      }
+    }
+
+    if(bestY>last+charH*.42){
+      cutPoints.push(bestY);
+      last=bestY;
+
+      // 次の境界は、実際に採用した位置から1文字先を基準にする。
+      // これにより文字サイズの微妙なズレが累積しにくい。
+      expected=bestY+charH;
+    }else{
+      expected+=charH;
+    }
+  }
+
+  // 最後は本文末尾そのものを切れ目にする。
+  if(cutPoints[cutPoints.length-1]!==n)cutPoints.push(n);
+
+  return {
+    cutPoints,
+    glyphBands:[],
+    seamScore
+  };
 }
 
 // 各縦列について、実際に文字がある上下範囲だけを抽出する。
@@ -595,10 +620,13 @@ function buildSourceColumns(c,cols,y0,y1){
     const cur=out[i];
     const charH=Math.max(8,cur.estimatedChar);
     const extraLead=Math.max(0,cur.leadingBlank-baseLead);
-    const indented=extraLead>=charH*.55 && extraLead<=charH*1.65;
-    cur.indentStart=indented;
+
+    // ページ先頭列の字下げだけは、その列自身の表示用として保持する。
+    // ただし、この時点では改行には使わない。
+    const pageHeadIndent=extraLead>=charH*.82 && extraLead<=charH*1.28;
 
     if(i===0){
+      cur.indentStart=false;
       cur.paragraphBreakBefore=false;
       continue;
     }
@@ -607,12 +635,24 @@ function buildSourceColumns(c,cols,y0,y1){
     const prevChar=Math.max(8,prev.estimatedChar);
     const extraTrail=Math.max(0,prev.trailingBlank-baseTrail);
 
-    // 改行は次の3条件に限定する。
-    // 1) 次列が約1文字分下がって始まる。
-    // 2) 次列先頭が「らしい小さな字形で始まる。
-    // 3) 前列末尾に通常より1文字以上の明確な空きがある。
-    const endedEarly=extraTrail>=prevChar*.95;
-    cur.paragraphBreakBefore=indented || cur.firstGlyphQuoteLike || endedEarly;
+    // ここからは「原文のレイアウト上で本当に段落改行されているか」だけを見る。
+    // 次列の字下げ量と、前列末尾の余り量が、ほぼ同じ1文字前後だけ対応しているときだけ改行とみなす。
+    const leadChars=extraLead/charH;
+    const trailChars=extraTrail/prevChar;
+
+    const hasLeadIndent=leadChars>=0.82 && leadChars<=1.28;
+    const hasTrailBlank=trailChars>=0.82 && trailChars<=1.28;
+
+    // 前後の対応量が近いときだけ、原文レイアウト上の本当の改行とみなす。
+    const matchedWrap=Math.abs(leadChars-trailChars)<=0.34;
+
+    // ごくまれに字下げ量が少し大きく揺れる原稿にも対応するため、
+    // 差は小さいが両方とも十分に大きい場合だけ許可する。
+    const trueParagraphBreak=hasLeadIndent && hasTrailBlank && matchedWrap;
+
+    // 原文にある改行だけを残し、それ以外では改行しない。
+    cur.paragraphBreakBefore=false;
+    cur.indentStart=false;
   }
   return out;
 }
@@ -621,31 +661,98 @@ function chooseTake(src,offset,limit){
   const remain=src.sh-offset;
   if(remain<=limit+.5)return remain;
 
-  const charH=Math.max(8,src.estimatedChar);
   const target=Math.min(src.sh,offset+limit);
+  const charH=Math.max(8,src.estimatedChar);
 
-  // 切断位置は必ず「文字が存在しない安全な白帯」の中央から選ぶ。
-  // 以前のように高さだけで強制切断すると、画面最下部で1文字が上下に分かれることがある。
+  // 現在の表示高さに収まる最後の「文字境界」を使う。
+  // これにより、画面下端まで可能な限り文字を詰めつつ、
+  // 文字の途中では切らない。
   let best=-1;
+
   for(const cp of src.cutPoints){
-    if(cp<=offset+2)continue;
-    if(cp<=target+.5)best=cp;
-    else break;
+    if(cp<=offset+charH*.30)continue;
+    if(cp<=target-.5){
+      best=cp;
+    }else{
+      break;
+    }
   }
+
   if(best>offset+2)return best-offset;
 
-  // 直前に安全な切れ目がない場合は、次の安全な切れ目まで列を少しだけ延長する。
-  // 最大で約0.9文字分まで許容する。文字を切断するよりもこちらを優先する。
-  const maxExtend=Math.max(4,charH*.90);
-  for(const cp of src.cutPoints){
-    if(cp<=target)continue;
-    if(cp-target<=maxExtend&&cp>offset+2)return cp-offset;
-    break;
+  // 残り高さに1文字も入らない場合だけ、次の表示列へ回す。
+  return 0;
+}
+
+// 1本まるごとの表示列でも厳密な白帯が見つからない場合だけ使う補助処理。
+// 文字ピッチから予想される「文字と文字の境界」付近だけを探索し、
+// その周辺で最もインク量が少ない位置を選ぶ。
+// 画面下端を越える位置は絶対に返さない。
+function chooseGridFallbackTake(src,offset,limit){
+  const remain=src.sh-offset;
+  if(remain<=limit+.5)return remain;
+
+  const charH=Math.max(8,src.estimatedChar);
+  const target=Math.min(src.sh,offset+limit);
+  const score=src.seamScore;
+  if(!score||!score.length)return 0;
+
+  const usable=target-offset;
+  if(usable<charH*.72)return 0;
+
+  // まず下端の少し手前にある広い範囲から、
+  // 最もインク量の少ない位置を探す。
+  // 文字中央より文字間を優先しつつ、できるだけ画面下まで使う。
+  const lo=Math.max(
+    Math.ceil(offset+charH*.55),
+    Math.floor(target-charH*1.15)
+  );
+  const hi=Math.min(
+    score.length-1,
+    Math.floor(target-charH*.10)
+  );
+
+  let bestY=-1;
+  let bestValue=Infinity;
+
+  if(hi>lo){
+    for(let y=lo;y<=hi;y++){
+      // 下端に近い位置をわずかに優先する。
+      const distancePenalty=(target-y)/(charH*18);
+      const v=score[y]+distancePenalty;
+      if(v<bestValue){
+        bestValue=v;
+        bestY=y;
+      }
+    }
   }
 
-  // それでも安全な切れ目がない場合は、この元列を途中で切らず最後まで使う。
-  // 出力列が一時的に少し高くなっても、1文字を上下に分断しないことを最優先する。
-  return remain;
+  // 広域探索で見つからない場合は、文字ピッチ上の境界付近を探索する。
+  if(bestY<=offset+3){
+    const maxChars=Math.floor(usable/charH);
+    for(let k=maxChars;k>=1;k--){
+      const center=offset+k*charH;
+      const a=Math.max(offset+3,Math.floor(center-charH*.22));
+      const b=Math.min(Math.floor(target-2),Math.ceil(center+charH*.22));
+      if(b<=a)continue;
+
+      let localY=-1;
+      let localScore=Infinity;
+      for(let y=a;y<=b&&y<score.length;y++){
+        if(score[y]<localScore){
+          localScore=score[y];
+          localY=y;
+        }
+      }
+      if(localY>offset+3){
+        bestY=localY;
+        break;
+      }
+    }
+  }
+
+  if(bestY>offset+3&&bestY<target)return bestY-offset;
+  return 0;
 }
 
 // 原稿列を読み順に流す。
@@ -676,7 +783,16 @@ function buildFlowColumns(c,sourceCols,zoom,usableH,gap){
         need-=indent;
       }
 
-      const take=chooseTake(src,offset,need);
+      let take=chooseTake(src,offset,need);
+
+      if(take<=.5){
+        // 通常の途中折返しでは補助的な強制分割を使わない。
+        // 文字分断を避けることを優先し、入らなければ次の表示列へ送る。
+        break;
+      }
+
+      // 画面下端は越えない。
+      take=Math.min(take,need);
       if(take<=.5)break;
 
       chunks.push({src,sourceY:src.sy+offset,sourceH:take,destY:used});
@@ -694,7 +810,15 @@ function buildFlowColumns(c,sourceCols,zoom,usableH,gap){
     if(!chunks.length){
       if(colIndex<sourceCols.length){
         const src=sourceCols[colIndex];
-        const take=chooseTake(src,offset,targetSrcH);
+
+        // 空の表示列では、まず文字かたまり境界に基づく通常の切れ目を使う。
+        // それでも切れ目が得られない特殊ケースだけ補助境界を使う。
+        let take=chooseTake(src,offset,targetSrcH);
+        if(take<=.5)take=chooseGridFallbackTake(src,offset,targetSrcH);
+
+        // 画面下端を越える量は絶対に描画しない。
+        take=Math.min(take,targetSrcH,src.sh-offset);
+
         if(take>.5){
           chunks.push({src,sourceY:src.sy+offset,sourceH:take,destY:0});
           maxW=Math.max(maxW,src.sw);
@@ -702,7 +826,14 @@ function buildFlowColumns(c,sourceCols,zoom,usableH,gap){
           offset+=take;
           if(offset>=src.sh-.5){colIndex++;offset=0;}
         }else{
-          colIndex++;offset=0;continue;
+          // 極端に特殊な画像で境界が全く得られない場合でも無限ループしない。
+          // その場合は約1文字分手前で最も安全な位置まで進める。
+          const emergency=Math.max(3,Math.min(targetSrcH,src.sh-offset,Math.max(3,targetSrcH-src.estimatedChar)));
+          chunks.push({src,sourceY:src.sy+offset,sourceH:emergency,destY:0});
+          maxW=Math.max(maxW,src.sw);
+          used=emergency;
+          offset+=emergency;
+          if(offset>=src.sh-.5){colIndex++;offset=0;}
         }
       }else break;
     }
