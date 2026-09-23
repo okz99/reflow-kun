@@ -81,7 +81,7 @@ main{position:fixed;left:0;right:0;top:0;bottom:calc(27px + env(safe-area-inset-
       <input id="splitSensitivity" type="range" min="40" max="100" value="75" step="5">
     </div>
     <div class="help">白い余白そのものは文字としてリフローしません。文字の上下が分断されないよう、文字間の安全な白い谷を探してから分割します。改行は列途中の空白では判定せず、原文で次の縦列が約1文字下がって始まる場合、または「のような行頭記号らしい形で始まる場合を優先して段落先頭として扱います。</div>
-    <div class="help">元PDFの1ページがiPhoneの横幅に収まらない場合は、横スクロールせず複数の画面に自動分割します。右スワイプで次の画面、左スワイプで前の画面へ移動します。PDF本体と、最後に読んだPDFページ・画面番号はこの端末内に自動保存されます。</div>
+    <div class="help">元PDFの1ページがiPhoneの横幅に収まらない場合は、横スクロールせず複数の画面に自動分割します。1つの元PDFページで使う読書画面は最大5画面までです。右スワイプで次の画面、左スワイプで前の画面へ移動できます。さらに画面を9分割し、左下タップで次の画面、右下タップで前の画面へ移動できます。PDF本体と、最後に読んだPDFページ・画面番号はこの端末内に自動保存されます。</div>
   </section>
 </div>
 
@@ -100,13 +100,14 @@ let pdf=null,pageNo=1,sourceCanvas=null,timer=null,renderToken=0;
 let touchStart=null;
 let virtualPages=[];
 let virtualPageIndex=0;
+const MAX_VIRTUAL_PAGES=5;
 
 // PDF本体はIndexedDB、ページ番号と設定はlocalStorageへ保存する。
 const DB_NAME='verticalPdfReflowDB';
 const DB_VERSION=1;
 const STORE_NAME='books';
 const BOOK_KEY='currentBook';
-const STATE_KEY='verticalPdfReflowStateV10';
+const STATE_KEY='verticalPdfReflowStateV11';
 let currentFileName='';
 
 function readSavedState(){
@@ -879,6 +880,7 @@ function paginateFlowColumns(columns,gap){
     const addition=(page.length?gap:0)+w;
     if(page.length&&used+addition>availableWidth+.5){
       pages.push(page);
+      if(pages.length>=MAX_VIRTUAL_PAGES)return pages.slice(0,MAX_VIRTUAL_PAGES);
       page=[];
       used=0;
     }
@@ -886,8 +888,8 @@ function paginateFlowColumns(columns,gap){
     page.push(col);
     used+=w;
   }
-  if(page.length)pages.push(page);
-  return pages;
+  if(page.length&&pages.length<MAX_VIRTUAL_PAGES)pages.push(page);
+  return pages.slice(0,MAX_VIRTUAL_PAGES);
 }
 
 function updatePageIndicators(){
@@ -978,6 +980,27 @@ async function moveReadingScreen(d){
   }
 }
 
+function tapZoneNavigation(clientX,clientY){
+  const rect=main.getBoundingClientRect();
+  const x=clientX-rect.left;
+  const y=clientY-rect.top;
+  if(x<0||y<0||x>rect.width||y>rect.height)return false;
+
+  const col = x<rect.width/3 ? 0 : (x<rect.width*2/3 ? 1 : 2);
+  const row = y<rect.height/3 ? 0 : (y<rect.height*2/3 ? 1 : 2);
+
+  // 9分割の左下＝次、右下＝前
+  if(row===2&&col===0){
+    moveReadingScreen(1);
+    return true;
+  }
+  if(row===2&&col===2){
+    moveReadingScreen(-1);
+    return true;
+  }
+  return false;
+}
+
 // 横スクロールは行わず、スワイプを読書画面の切り替え専用にする。
 main.addEventListener('touchstart',e=>{
   if(e.touches.length!==1)return;
@@ -992,6 +1015,14 @@ main.addEventListener('touchend',e=>{
   const dy=t.clientY-touchStart.y;
   const dt=Date.now()-touchStart.time;
   touchStart=null;
+
+  // まずタップを判定する。
+  if(dt<=350&&Math.abs(dx)<18&&Math.abs(dy)<18){
+    tapZoneNavigation(t.clientX,t.clientY);
+    return;
+  }
+
+  // つぎにスワイプを判定する。
   if(dt>900||Math.abs(dx)<55||Math.abs(dx)<Math.abs(dy)*1.20)return;
 
   // ユーザー指定どおり、右スワイプで次、左スワイプで前。
